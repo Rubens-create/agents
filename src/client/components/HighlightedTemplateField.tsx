@@ -1,4 +1,11 @@
-import { forwardRef, type ReactNode, type Ref, useEffect, useRef } from "react";
+import {
+  forwardRef,
+  type ReactNode,
+  type Ref,
+  useCallback,
+  useEffect,
+  useRef,
+} from "react";
 import { cn } from "@/client/lib/utils";
 
 // Generic template field with inline {{token}} highlighting, via the classic transparent-control-
@@ -25,7 +32,9 @@ function renderHighlighted(
       <span
         key={key++}
         className={cn(
-          known ? "text-accent font-semibold" : "text-warning underline decoration-wavy",
+          known
+            ? "font-semibold text-accent"
+            : "text-warning underline decoration-wavy",
         )}
       >
         {m[0]}
@@ -42,7 +51,7 @@ function renderHighlighted(
 // Strict font-family, exact line-height (leading-6 / 24px) and whitespace rules prevent font desync
 // or line-height drift where letters stack on top of each other.
 const FIELD_BASE =
-  "block w-full m-0 rounded-lg border font-mono text-sm leading-6 tracking-normal box-border tab-2";
+  "tab-2 m-0 block w-full rounded-lg border box-border font-mono text-sm leading-6 tracking-normal";
 
 export const HighlightedTemplateField = forwardRef<
   HTMLInputElement | HTMLTextAreaElement,
@@ -79,19 +88,21 @@ export const HighlightedTemplateField = forwardRef<
     ref,
   ) => {
     const backdropRef = useRef<HTMLDivElement>(null);
-    const controlRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
+    const controlRef = useRef<
+      HTMLInputElement | HTMLTextAreaElement | null
+    >(null);
 
     const pad = multiline ? "p-3" : "px-4 py-2";
     const wrapCls = multiline
       ? "whitespace-pre-wrap break-words overflow-x-hidden"
       : "whitespace-pre overflow-x-auto";
 
-    const mirrorScroll = (el: HTMLElement) => {
+    const mirrorScroll = useCallback((el: HTMLElement) => {
       const b = backdropRef.current;
       if (!b) return;
       b.scrollTop = el.scrollTop;
       b.scrollLeft = el.scrollLeft;
-    };
+    }, []);
 
     const sharedText = cn(FIELD_BASE, pad, wrapCls, textClassName);
 
@@ -101,7 +112,11 @@ export const HighlightedTemplateField = forwardRef<
       if (typeof ref === "function") {
         ref(el);
       } else if (ref && "current" in ref) {
-        (ref as React.MutableRefObject<HTMLInputElement | HTMLTextAreaElement | null>).current = el;
+        (
+          ref as React.MutableRefObject<
+            HTMLInputElement | HTMLTextAreaElement | null
+          >
+        ).current = el;
       }
     };
 
@@ -109,11 +124,15 @@ export const HighlightedTemplateField = forwardRef<
       if (controlRef.current) {
         mirrorScroll(controlRef.current);
       }
-    }, [value]);
+    }, [mirrorScroll, value]);
 
     return (
       <div
-        className={cn("relative min-w-0 bg-bg-tertiary rounded-lg", fill && "min-h-0 flex-1 h-full", className)}
+        className={cn(
+          "relative min-w-0 rounded-lg bg-bg-tertiary",
+          fill && "h-full min-h-0 flex-1",
+          className,
+        )}
       >
         {/* Backdrop (rendered behind with highlighted tokens) */}
         <div
@@ -121,7 +140,7 @@ export const HighlightedTemplateField = forwardRef<
           aria-hidden="true"
           className={cn(
             sharedText,
-            "pointer-events-none absolute inset-0 overflow-y-auto border-transparent text-text-primary select-none",
+            "pointer-events-none absolute inset-0 select-none overflow-y-auto border-transparent text-text-primary",
             fill ? "h-full" : "h-full",
           )}
           style={{
@@ -150,8 +169,8 @@ export const HighlightedTemplateField = forwardRef<
             }}
             className={cn(
               sharedText,
-              "relative bg-transparent placeholder-text-placeholder focus:border-border-focus focus:outline-none selection:bg-accent/30 selection:text-transparent",
-              fill ? "h-full resize-none" : "resize-y min-h-[140px]",
+              "relative bg-transparent placeholder-text-placeholder selection:bg-accent/30 selection:text-transparent focus:border-border-focus focus:outline-none",
+              fill ? "h-full resize-none" : "min-h-[140px] resize-y",
               invalid ? "border-error" : "border-border",
             )}
           />
@@ -171,7 +190,7 @@ export const HighlightedTemplateField = forwardRef<
             }}
             className={cn(
               sharedText,
-              "relative bg-transparent placeholder-text-placeholder focus:border-border-focus focus:outline-none selection:bg-accent/30 selection:text-transparent",
+              "relative bg-transparent placeholder-text-placeholder selection:bg-accent/30 selection:text-transparent focus:border-border-focus focus:outline-none",
               invalid ? "border-error" : "border-border",
             )}
           />

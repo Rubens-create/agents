@@ -3,15 +3,10 @@ import logger from "@/api/lib/logger";
 import basePrisma from "@/api/lib/prisma";
 import { contactInboxThreadId } from "@/graph/checkpointer";
 import { ingestMessageIntoThread } from "@/graph/ingest";
-import { runScopedOn, type TenantContext } from "@/lib/tenancy";
 import { type ChatwootClient } from "./client";
 import { loadChatwootClient } from "./instance";
 import { parseChatwootMessages } from "./messages";
 import { renderInboundMessage } from "./render";
-
-function sysCtx(tenantId: bigint): TenantContext {
-  return { tenantId, userId: null, role: "TENANT_ADMIN" };
-}
 
 export interface MigrateHistoryOptions {
   // Max conversations to process (0 or undefined = unlimited / all available)

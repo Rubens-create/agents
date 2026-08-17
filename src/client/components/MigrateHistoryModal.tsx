@@ -1,4 +1,4 @@
-import { History, Loader2, MessageSquare } from "lucide-react";
+import { History, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -6,8 +6,8 @@ import {
   FormField,
   Modal,
   Select,
-  type ModalController,
   useToast,
+  type ModalController,
 } from "@/client/components";
 import { api } from "@/client/lib/api";
 
@@ -69,7 +69,10 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
           description:
             typeof error === "object" && error !== null && "message" in error
               ? String(error.message)
-              : t("channels.migrateErrorDesc", "Não foi possível migrar as conversas."),
+              : t(
+                  "channels.migrateErrorDesc",
+                  "Não foi possível migrar as conversas.",
+                ),
         });
         return;
       }
@@ -111,10 +114,16 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
       footer={
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={handleClose} disabled={running}>
-            {result ? t("common.close", "Fechar") : t("common.cancel", "Cancelar")}
+            {result
+              ? t("common.close", "Fechar")
+              : t("common.cancel", "Cancelar")}
           </Button>
           {!result && (
-            <Button onClick={startMigration} loading={running} variant="primary">
+            <Button
+              onClick={startMigration}
+              loading={running}
+              variant="primary"
+            >
               <History className="h-4 w-4" aria-hidden="true" />
               {t("channels.startMigrate", "Iniciar Migração")}
             </Button>
@@ -148,7 +157,7 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
                 </span>
               </div>
               <div className="rounded-md bg-bg-secondary p-2">
-                <span className="block font-bold text-lg text-accent">
+                <span className="block font-bold text-accent text-lg">
                   {result.messagesIngested}
                 </span>
                 <span className="text-text-muted text-xs">
@@ -190,7 +199,9 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
                 disabled={running}
               >
                 <option value="50">Últimas 50 conversas</option>
-                <option value="100">Últimas 100 conversas (Recomendado)</option>
+                <option value="100">
+                  Últimas 100 conversas (Recomendado)
+                </option>
                 <option value="300">Últimas 300 conversas</option>
                 <option value="0">Todas as conversas disponíveis</option>
               </Select>
@@ -217,7 +228,10 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
 
             {running && (
               <div className="flex items-center justify-center gap-2 py-4 text-accent text-sm">
-                <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
+                <Loader2
+                  className="h-5 w-5 animate-spin"
+                  aria-hidden="true"
+                />
                 <span>
                   {t(
                     "channels.migratingHistoryProgress",

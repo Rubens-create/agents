@@ -53,15 +53,19 @@ Opções:
     process.exit(0);
   }
 
-  console.log(`📦 Encontrada(s) ${instances.length} instância(s) ativa(s) para migrar.\n`);
+  console.log(
+    `📦 Encontrada(s) ${instances.length} instância(s) ativa(s) para migrar.\n`,
+  );
 
   for (const inst of instances) {
-    console.log(`--------------------------------------------------`);
+    console.log("--------------------------------------------------");
     console.log(`📍 Processando Instância ID: ${inst.id}`);
-    console.log(`   Tenant ID: ${inst.tenantId} (${inst.tenant.slug ?? "sem slug"})`);
+    console.log(
+      `   Tenant ID: ${inst.tenantId} (${inst.tenant.slug ?? "sem slug"})`,
+    );
     console.log(`   Account ID: ${inst.accountId}`);
     console.log(`   URL Base: ${inst.deployment.baseUrl}`);
-    console.log(`--------------------------------------------------`);
+    console.log("--------------------------------------------------");
 
     try {
       const result = await migrateChatwootInstanceHistory(
@@ -74,9 +78,13 @@ Opções:
       );
 
       console.log(`✅ Concluído para a instância ${inst.id}:`);
-      console.log(`   - Conversas processadas: ${result.conversationsProcessed}`);
+      console.log(
+        `   - Conversas processadas: ${result.conversationsProcessed}`,
+      );
       console.log(`   - Mensagens ingeridas: ${result.messagesIngested}`);
-      console.log(`   - Mensagens ignoradas (já sincronizadas): ${result.messagesSkipped}`);
+      console.log(
+        `   - Mensagens ignoradas (já sincronizadas): ${result.messagesSkipped}`,
+      );
       if (result.errors.length > 0) {
         console.log(`   - Erros encontrados: ${result.errors.length}`);
         for (const err of result.errors.slice(0, 5)) {

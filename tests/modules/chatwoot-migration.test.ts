@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { PrismaClient } from "@/../generated/prisma/client";
 import type { ChatwootClient } from "@/modules/chatwoot/client";
 import { migrateChatwootInstanceHistory } from "@/modules/chatwoot/migration";
 
@@ -48,7 +49,7 @@ describe("migrateChatwootInstanceHistory", () => {
       agentThread: {
         findUnique: async () => null,
       },
-    } as unknown as any;
+    } as unknown as PrismaClient;
 
     const result = await migrateChatwootInstanceHistory(1n, 10n, {
       maxConversations: 10,

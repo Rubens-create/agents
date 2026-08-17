@@ -590,7 +590,8 @@ export const chatwootAdminController = new Elysia({
         t.Object({
           maxConversations: t.Optional(
             t.Number({
-              description: "Maximum number of conversations to migrate (0 = all).",
+              description:
+                "Maximum number of conversations to migrate (0 = all).",
             }),
           ),
           status: t.Optional(
