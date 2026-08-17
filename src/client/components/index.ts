@@ -33,6 +33,10 @@ export { Markdown } from "./Markdown";
 export { MediaAudio } from "./MediaAudio";
 export { MediaImage } from "./MediaImage";
 export {
+  MigrateHistoryModal,
+  type MigrateHistoryModalProps,
+} from "./MigrateHistoryModal";
+export {
   Modal,
   ModalCancelButton,
   type ModalController,

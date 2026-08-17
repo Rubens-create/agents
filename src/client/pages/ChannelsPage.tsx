@@ -3,6 +3,7 @@ import {
   Check,
   ChevronDown,
   ExternalLink,
+  History,
   Inbox as InboxIcon,
   KeyRound,
   Loader2,
@@ -26,6 +27,7 @@ import {
   FormField,
   InboxRow,
   Input,
+  MigrateHistoryModal,
   Modal,
   PageContainer,
   Skeleton,
@@ -220,6 +222,7 @@ export function ChannelsPage() {
 
   const connectModal = useModalController();
   const tokenModal = useModalController();
+  const migrateModal = useModalController<Account>();
   // The account picker (super-admin): choose which of the server's accounts this workspace answers.
   const manageModal = useModalController();
   // Strong confirmation (backup warning + re-typed name + password) for the two irreversible,
@@ -990,6 +993,25 @@ export function ChannelsPage() {
                             <RefreshCw className="h-4 w-4" aria-hidden="true" />
                           </button>
                         </Tooltip>
+                        <Tooltip
+                          content={t(
+                            "channels.migrateConversations",
+                            "Migrar conversas do Chatwoot",
+                          )}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => migrateModal.open(acct)}
+                            disabled={busy}
+                            aria-label={t(
+                              "channels.migrateConversations",
+                              "Migrar conversas do Chatwoot",
+                            )}
+                            className="inline-flex shrink-0 items-center justify-center rounded p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-accent disabled:opacity-50"
+                          >
+                            <History className="h-4 w-4" aria-hidden="true" />
+                          </button>
+                        </Tooltip>
                         {isSuperAdmin && (
                           <Tooltip
                             content={t(
@@ -1350,6 +1372,7 @@ export function ChannelsPage() {
       </Modal>
 
       <StrongConfirmModal modal={strongConfirm} />
+      <MigrateHistoryModal modal={migrateModal} />
     </PageContainer>
   );
 }

@@ -32,6 +32,7 @@ import {
   softDisconnectChatwootInstance,
   syncInboxes,
 } from "@/modules/chatwoot/management";
+import { migrateChatwootInstanceHistory } from "@/modules/chatwoot/migration";
 
 // Chatwoot instance + inbox management (per-tenant). TENANT_ADMIN. SEPARATE from the public webhook
 // receiver controller (same /v1/chatwoot prefix; no path overlap: /instances* + /inboxes* here vs
@@ -551,4 +552,60 @@ export const chatwootAdminController = new Elysia({
       }),
       response: errors(400, 401, 403, 404, 409, 502),
     },
+  )
+  // Migrate historical conversations from Chatwoot into the LangGraph checkpointer memory.
+  .post(
+    "/instances/:id/migrate-history",
+    async ({ tenantContext, params, body }) => {
+      const ctx = ctxOrThrow(tenantContext);
+      const b = (body ?? {}) as {
+        maxConversations?: number;
+        status?: "all" | "open" | "pending" | "resolved" | "snoozed";
+        inboxId?: number;
+      };
+      const result = await migrateChatwootInstanceHistory(
+        ctx.tenantId,
+        BigInt(params.id),
+        {
+          maxConversations: b.maxConversations,
+          status: b.status,
+          inboxId: b.inboxId,
+        },
+      );
+      return {
+        instance: instanceIdentity,
+        result,
+      };
+    },
+    {
+      requireRole: "TENANT_ADMIN",
+      detail: doc(
+        "Migrate Chatwoot history",
+        "Pulls conversation history from Chatwoot and ingests it into LangGraph checkpointer memory.",
+      ),
+      params: t.Object({
+        id: t.String({ description: "ChatwootInstance id (BigInt string)." }),
+      }),
+      body: t.Optional(
+        t.Object({
+          maxConversations: t.Optional(
+            t.Number({
+              description: "Maximum number of conversations to migrate (0 = all).",
+            }),
+          ),
+          status: t.Optional(
+            t.Union([
+              t.Literal("all"),
+              t.Literal("open"),
+              t.Literal("pending"),
+              t.Literal("resolved"),
+              t.Literal("snoozed"),
+            ]),
+          ),
+          inboxId: t.Optional(t.Number()),
+        }),
+      ),
+      response: errors(400, 401, 403, 404, 502),
+    },
   );
+

@@ -150,13 +150,7 @@ export interface SupportContact {
 // locale-specific inbox. Set to null to hide the support block entirely.
 // t('nav.support', 'Support')
 // t('support.email', 'support@fazer.ai')
-export const SUPPORT_LINK: SupportContact | null = {
-  emailKey: "support.email",
-  defaultEmail: "support@fazer.ai",
-  labelKey: "nav.support",
-  defaultLabel: "Support",
-  icon: LifeBuoy,
-};
+export const SUPPORT_LINK: SupportContact | null = null;
 
 // t('nav.website', 'fazer.ai')
 // t('nav.github', 'GitHub')
@@ -165,22 +159,7 @@ export const SUPPORT_LINK: SupportContact | null = {
 // both point at fazer-ai/agents regardless of edition (never the hub).
 export const AGENTS_REPO_URL = "https://github.com/fazer-ai/agents";
 
-export const SECONDARY_LINKS: FooterLink[] = [
-  {
-    id: "website",
-    href: "https://fazer.ai",
-    labelKey: "nav.website",
-    defaultLabel: "fazer.ai",
-    icon: Globe,
-  },
-  {
-    id: "github",
-    href: AGENTS_REPO_URL,
-    labelKey: "nav.github",
-    defaultLabel: "GitHub",
-    icon: GithubIcon,
-  },
-];
+export const SECONDARY_LINKS: FooterLink[] = [];
 
 // Upgrade destination for Pro-gated features (the hub's agents page). Centralized here, alongside
 // the other external links, so every <ProGate> CTA and any future upsell point at one URL.

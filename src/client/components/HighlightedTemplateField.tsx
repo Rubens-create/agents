@@ -1,4 +1,4 @@
-import { forwardRef, type ReactNode, type Ref, useRef } from "react";
+import { forwardRef, type ReactNode, type Ref, useEffect, useRef } from "react";
 import { cn } from "@/client/lib/utils";
 
 // Generic template field with inline {{token}} highlighting, via the classic transparent-control-
@@ -8,9 +8,6 @@ import { cn } from "@/client/lib/utils";
 // the same component serves the prompt editor (lowercase prompt vars) and the HTTP tool editor
 // (AI fields + context vars + {{secret}}). Renders a <textarea> when `multiline`, else an <input>.
 
-// Splits text into plain runs and highlighted {{token}} spans (known → accent, unknown → warning
-// with a wavy underline so typos stand out). Returns React nodes (never innerHTML) — the content is
-// operator-controlled, so building elements keeps it XSS-safe by construction.
 function renderHighlighted(
   text: string,
   patternSource: string,
@@ -28,7 +25,7 @@ function renderHighlighted(
       <span
         key={key++}
         className={cn(
-          known ? "text-accent" : "text-warning underline decoration-wavy",
+          known ? "text-accent font-semibold" : "text-warning underline decoration-wavy",
         )}
       >
         {m[0]}
@@ -37,20 +34,15 @@ function renderHighlighted(
     last = idx + m[0].length;
   }
   if (last < text.length) out.push(text.slice(last));
-  // A trailing newline renders an empty last line in the control but collapses in the backdrop div;
-  // a trailing space keeps the two heights (and scroll) in sync.
   if (text.endsWith("\n")) out.push(" ");
   return out;
 }
 
-// Box model shared by both layers. Matches <Input>/<Textarea> (border, bg-bg-tertiary, focus ring).
-// Font-size/line-height come from `textClassName` (applied to BOTH layers) so the glyphs line up;
-// padding differs (multiline px-3 like <Textarea>, single-line px-4 like <Input>).
-// `block` is load-bearing: without it the control is inline-block and its line-box adds a baseline
-// descender gap, so the wrapper grows taller than the control and the absolute backdrop shows below
-// the border as a thin band. `block` makes wrapper height == control height so the two layers align.
+// Rigidly synchronized box model and typography tokens between the backdrop and the editable control.
+// Strict font-family, exact line-height (leading-6 / 24px) and whitespace rules prevent font desync
+// or line-height drift where letters stack on top of each other.
 const FIELD_BASE =
-  "block w-full rounded-lg border bg-bg-tertiary py-2 focus:border-border-focus focus:outline-none";
+  "block w-full m-0 rounded-lg border font-mono text-sm leading-6 tracking-normal box-border tab-2";
 
 export const HighlightedTemplateField = forwardRef<
   HTMLInputElement | HTMLTextAreaElement,
@@ -63,12 +55,8 @@ export const HighlightedTemplateField = forwardRef<
     rows?: number;
     placeholder?: string;
     invalid?: boolean;
-    // Multiline only: grow to fill a flex-column parent (textarea becomes h-full, non-resizable)
-    // instead of the fixed `rows` height — used by the prompt editor's expand-to-modal view.
     fill?: boolean;
-    // Applied to the wrapper (e.g. "flex-1" so a single-line field fills a flex row).
     className?: string;
-    // Applied to BOTH layers; controls font-family/size/leading. Defaults to "text-sm".
     textClassName?: string;
     "aria-label"?: string;
   }
@@ -85,68 +73,105 @@ export const HighlightedTemplateField = forwardRef<
       invalid = false,
       fill = false,
       className,
-      textClassName = "text-sm",
+      textClassName,
       "aria-label": ariaLabel,
     },
     ref,
   ) => {
     const backdropRef = useRef<HTMLDivElement>(null);
-    const pad = multiline ? "px-3" : "px-4";
-    // The backdrop wraps like the textarea (multiline) or stays a single non-wrapping line that
-    // scrolls horizontally with the input (single-line).
+    const controlRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
+
+    const pad = multiline ? "p-3" : "px-4 py-2";
     const wrapCls = multiline
-      ? "whitespace-pre-wrap break-words"
-      : "whitespace-pre";
-    const mirror = (el: HTMLElement) => {
+      ? "whitespace-pre-wrap break-words overflow-x-hidden"
+      : "whitespace-pre overflow-x-auto";
+
+    const mirrorScroll = (el: HTMLElement) => {
       const b = backdropRef.current;
       if (!b) return;
       b.scrollTop = el.scrollTop;
       b.scrollLeft = el.scrollLeft;
     };
-    const sharedText = cn(FIELD_BASE, pad, textClassName, wrapCls);
+
+    const sharedText = cn(FIELD_BASE, pad, wrapCls, textClassName);
+
+    // Keep internal and forwarded refs unified
+    const setRefs = (el: HTMLInputElement | HTMLTextAreaElement | null) => {
+      controlRef.current = el;
+      if (typeof ref === "function") {
+        ref(el);
+      } else if (ref && "current" in ref) {
+        (ref as React.MutableRefObject<HTMLInputElement | HTMLTextAreaElement | null>).current = el;
+      }
+    };
+
+    useEffect(() => {
+      if (controlRef.current) {
+        mirrorScroll(controlRef.current);
+      }
+    }, [value]);
+
     return (
       <div
-        className={cn("relative min-w-0", fill && "min-h-0 flex-1", className)}
+        className={cn("relative min-w-0 bg-bg-tertiary rounded-lg", fill && "min-h-0 flex-1 h-full", className)}
       >
+        {/* Backdrop (rendered behind with highlighted tokens) */}
         <div
           ref={backdropRef}
           aria-hidden="true"
           className={cn(
             sharedText,
-            "pointer-events-none absolute inset-0 overflow-hidden border-transparent text-text-primary",
+            "pointer-events-none absolute inset-0 overflow-y-auto border-transparent text-text-primary select-none",
+            fill ? "h-full" : "h-full",
           )}
+          style={{
+            scrollbarWidth: "none",
+            msOverflowStyle: "none",
+          }}
         >
           {renderHighlighted(value, patternSource, isKnownToken)}
         </div>
+
+        {/* Editable input / textarea (on top with transparent text and visible caret) */}
         {multiline ? (
           <textarea
-            ref={ref as Ref<HTMLTextAreaElement>}
+            ref={setRefs as Ref<HTMLTextAreaElement>}
             rows={rows}
             value={value}
             onChange={(e) => onChange(e.target.value)}
-            onScroll={(e) => mirror(e.currentTarget)}
+            onScroll={(e) => mirrorScroll(e.currentTarget)}
             spellCheck={false}
             placeholder={placeholder}
             aria-label={ariaLabel}
+            style={{
+              color: "transparent",
+              WebkitTextFillColor: "transparent",
+              caretColor: "var(--color-text-primary)",
+            }}
             className={cn(
               sharedText,
-              "relative bg-transparent text-transparent placeholder-text-placeholder caret-text-primary",
-              fill ? "h-full resize-none" : "resize-y",
+              "relative bg-transparent placeholder-text-placeholder focus:border-border-focus focus:outline-none selection:bg-accent/30 selection:text-transparent",
+              fill ? "h-full resize-none" : "resize-y min-h-[140px]",
               invalid ? "border-error" : "border-border",
             )}
           />
         ) : (
           <input
-            ref={ref as Ref<HTMLInputElement>}
+            ref={setRefs as Ref<HTMLInputElement>}
             value={value}
             onChange={(e) => onChange(e.target.value)}
-            onScroll={(e) => mirror(e.currentTarget)}
+            onScroll={(e) => mirrorScroll(e.currentTarget)}
             spellCheck={false}
             placeholder={placeholder}
             aria-label={ariaLabel}
+            style={{
+              color: "transparent",
+              WebkitTextFillColor: "transparent",
+              caretColor: "var(--color-text-primary)",
+            }}
             className={cn(
               sharedText,
-              "relative bg-transparent text-transparent placeholder-text-placeholder caret-text-primary",
+              "relative bg-transparent placeholder-text-placeholder focus:border-border-focus focus:outline-none selection:bg-accent/30 selection:text-transparent",
               invalid ? "border-error" : "border-border",
             )}
           />

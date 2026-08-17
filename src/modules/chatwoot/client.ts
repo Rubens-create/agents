@@ -681,6 +681,28 @@ export class ChatwootClient {
 
   // ── admin-token (history, provisioning, anything outside the bot allowlist) ──
 
+  listConversations(
+    opts?: {
+      page?: number;
+      status?: "all" | "open" | "pending" | "resolved" | "snoozed";
+      inboxId?: number;
+    },
+    timeoutMs: number = REQUEST_TIMEOUT_MS,
+  ): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (opts?.page) params.set("page", String(opts.page));
+    if (opts?.status) params.set("status", opts.status);
+    if (opts?.inboxId) params.set("inbox_id", String(opts.inboxId));
+    const qs = params.toString() ? `?${params.toString()}` : "";
+    return this.request(
+      this.config.adminToken,
+      "GET",
+      `/conversations${qs}`,
+      undefined,
+      timeoutMs,
+    );
+  }
+
   getConversation(conversationId: number): Promise<unknown> {
     return this.request(
       this.config.adminToken,
