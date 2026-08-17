@@ -1,7 +1,7 @@
 import type { PrismaClient } from "@/../generated/prisma/client";
 import logger from "@/api/lib/logger";
 import basePrisma from "@/api/lib/prisma";
-import { contactInboxThreadId } from "@/graph/checkpointer";
+import { contactInboxThreadId, resolveGraphThreadId } from "@/graph/checkpointer";
 import { ingestMessageIntoThread } from "@/graph/ingest";
 import { type ChatwootClient } from "./client";
 import { loadChatwootClient } from "./instance";
@@ -44,7 +44,9 @@ interface RawConversationItem {
 interface ParsedConversation {
   id: number;
   inboxId: number;
-  contactInboxId: number;
+  // contactInboxId may be absent from the conversations list endpoint — resolved later via
+  // getConversation or falling back to per-conversation thread keying.
+  contactInboxId: number | null;
 }
 
 function parseConversationsResponse(raw: unknown): ParsedConversation[] {
@@ -69,14 +71,13 @@ function parseConversationsResponse(raw: unknown): ParsedConversation[] {
     const c = item as RawConversationItem;
     const id = Number(c.id);
     const inboxId = Number(c.inbox_id);
-    const contactInboxId = Number(c.contact_inbox?.id);
+    const rawCiId = Number(c.contact_inbox?.id);
+    // contact_inbox is NOT included in the Chatwoot conversations list response — only in the
+    // individual conversation detail. Accept conversations without it and resolve later.
+    const contactInboxId =
+      Number.isInteger(rawCiId) && rawCiId > 0 ? rawCiId : null;
 
-    if (
-      Number.isInteger(id) &&
-      id > 0 &&
-      Number.isInteger(contactInboxId) &&
-      contactInboxId > 0
-    ) {
+    if (Number.isInteger(id) && id > 0) {
       out.push({
         id,
         inboxId: Number.isInteger(inboxId) ? inboxId : 0,
@@ -85,6 +86,55 @@ function parseConversationsResponse(raw: unknown): ParsedConversation[] {
     }
   }
   return out;
+}
+
+// Extract contact_inbox.id from a single-conversation detail response.
+function extractContactInboxId(raw: unknown): number | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const ci = obj.contact_inbox as { id?: unknown } | null | undefined;
+  const id = Number(ci?.id);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+// Fetch ALL message pages for a conversation by paginating backwards with `before`.
+async function fetchAllMessages(
+  client: ChatwootClient,
+  conversationId: number,
+): Promise<unknown[]> {
+  const allMessages: unknown[] = [];
+  let before: number | undefined;
+  const MAX_PAGES = 200; // safety cap
+
+  for (let i = 0; i < MAX_PAGES; i++) {
+    const raw = await client.getMessages(conversationId, before != null ? { before } : undefined);
+    const page: unknown[] = Array.isArray(raw)
+      ? raw
+      : raw &&
+          typeof raw === "object" &&
+          Array.isArray((raw as Record<string, unknown>).payload)
+        ? (raw as { payload: unknown[] }).payload
+        : [];
+
+    if (page.length === 0) break;
+
+    allMessages.push(...page);
+
+    // Find the smallest message id in this page to use as the `before` cursor
+    let minId = Infinity;
+    for (const item of page) {
+      if (item && typeof item === "object") {
+        const id = Number((item as { id?: unknown }).id);
+        if (Number.isInteger(id) && id < minId) {
+          minId = id;
+        }
+      }
+    }
+    if (minId === Infinity || page.length < 20) break; // last page
+    before = minId;
+  }
+
+  return allMessages;
 }
 
 export async function migrateChatwootInstanceHistory(
@@ -166,24 +216,34 @@ export async function migrateChatwootInstanceHistory(
   // 2. Process each conversation
   for (const conv of conversationsToProcess) {
     result.conversationsProcessed++;
-    const graphThreadId = contactInboxThreadId(
+
+    // Resolve contactInboxId: if the list response didn't include it, fetch the
+    // individual conversation detail (which DOES include contact_inbox).
+    let contactInboxId = conv.contactInboxId;
+    if (contactInboxId == null) {
+      try {
+        const detail = await client.getConversation(conv.id);
+        contactInboxId = extractContactInboxId(detail);
+      } catch {
+        // Non-fatal: fall back to per-conversation thread keying
+        logger.debug(
+          "Could not fetch conversation %d detail for contact_inbox; falling back to per-conversation thread",
+          conv.id,
+        );
+      }
+    }
+
+    const graphThreadId = resolveGraphThreadId(
       tenantId,
       instanceId,
-      conv.contactInboxId,
+      conv.id,
+      contactInboxId,
     );
 
     try {
-      const rawMessages = await client.getMessages(conv.id);
-      const parsedRows = parseChatwootMessages(rawMessages);
-
-      // Raw array to inspect sender metadata if present
-      const rawList: unknown[] = Array.isArray(rawMessages)
-        ? rawMessages
-        : rawMessages &&
-            typeof rawMessages === "object" &&
-            Array.isArray((rawMessages as Record<string, unknown>).payload)
-          ? (rawMessages as { payload: unknown[] }).payload
-          : [];
+      // Fetch ALL message pages (not just the most recent ~20)
+      const rawList = await fetchAllMessages(client, conv.id);
+      const parsedRows = parseChatwootMessages(rawList);
 
       const rawMap = new Map<number, Record<string, unknown>>();
       for (const item of rawList) {
@@ -203,6 +263,9 @@ export async function migrateChatwootInstanceHistory(
         if (text) idToText.set(m.id, text);
       }
       const resolveQuoted = (quotedId: number) => idToText.get(quotedId) ?? null;
+
+      // Sort messages by id ascending so the watermark advances monotonically
+      parsedRows.sort((a, b) => a.id - b.id);
 
       for (const msg of parsedRows) {
         // Skip activity or private internal notes
@@ -241,7 +304,7 @@ export async function migrateChatwootInstanceHistory(
             tenantId,
             instanceId,
             conversationId: conv.id,
-            contactInboxId: conv.contactInboxId,
+            contactInboxId: contactInboxId ?? conv.id,
             graphThreadId,
             messageId: msg.id,
             role: "customer",
@@ -265,7 +328,7 @@ export async function migrateChatwootInstanceHistory(
             tenantId,
             instanceId,
             conversationId: conv.id,
-            contactInboxId: conv.contactInboxId,
+            contactInboxId: contactInboxId ?? conv.id,
             graphThreadId,
             messageId: msg.id,
             role: "human_agent",
