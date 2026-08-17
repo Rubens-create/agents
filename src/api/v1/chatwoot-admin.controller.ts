@@ -579,22 +579,35 @@ export const chatwootAdminController = new Elysia({
         );
         const encoder = new TextEncoder();
         const stream = new ReadableStream({
-          async pull(controller) {
-            const { value, done } = await gen.next();
-            if (done) {
+          async start(controller) {
+            try {
+              for await (const event of gen) {
+                controller.enqueue(
+                  encoder.encode(JSON.stringify(event) + "\n"),
+                );
+              }
               controller.close();
-              return;
+            } catch (err) {
+              const errMsg =
+                err instanceof Error ? err.message : String(err);
+              controller.enqueue(
+                encoder.encode(
+                  JSON.stringify({
+                    type: "conversation_error",
+                    conversationId: 0,
+                    error: errMsg,
+                  }) + "\n",
+                ),
+              );
+              controller.close();
             }
-            controller.enqueue(
-              encoder.encode(JSON.stringify(value) + "\n"),
-            );
           },
         });
         return new Response(stream, {
           headers: {
-            "content-type": "text/event-stream",
-            "cache-control": "no-cache",
-            connection: "keep-alive",
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache, no-transform",
+            "x-accel-buffering": "no",
           },
         });
       }

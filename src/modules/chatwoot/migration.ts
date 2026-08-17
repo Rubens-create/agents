@@ -387,7 +387,30 @@ export async function* migrateChatwootInstanceHistoryStream(
 ): AsyncGenerator<MigrationProgressEvent> {
   const base = options.base ?? basePrisma;
   const loader = options.loadClient ?? loadChatwootClient;
-  const client = await loader(tenantId, instanceId);
+  let client: ChatwootClient;
+  try {
+    client = await loader(tenantId, instanceId);
+  } catch (loadErr) {
+    const errMsg =
+      loadErr instanceof Error ? loadErr.message : String(loadErr);
+    logger.error(
+      "Failed to load Chatwoot client for instance %s: %s",
+      String(instanceId),
+      errMsg,
+    );
+    yield { type: "conversation_error", conversationId: 0, error: errMsg };
+    yield {
+      type: "complete",
+      result: {
+        instanceId: String(instanceId),
+        conversationsProcessed: 0,
+        messagesIngested: 0,
+        messagesSkipped: 0,
+        errors: [{ conversationId: 0, error: errMsg }],
+      },
+    };
+    return;
+  }
 
   const statusFilter = options.status ?? "all";
   const maxConvs = options.maxConversations ?? 0;

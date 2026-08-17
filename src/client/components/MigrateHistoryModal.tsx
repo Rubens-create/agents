@@ -138,14 +138,23 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
       );
 
       if (!res.ok) {
-        const errBody = (await res.json().catch(() => ({}))) as Record<
-          string,
-          unknown
-        >;
-        const msg =
-          (errBody.error as string) ||
-          (errBody.message as string) ||
-          `Erro HTTP ${res.status}: falha na migração`;
+        let msg = `Erro HTTP ${res.status}: falha na migração`;
+        try {
+          const rawText = await res.text();
+          try {
+            const errBody = JSON.parse(rawText) as Record<string, unknown>;
+            msg =
+              (errBody.error as string) ||
+              (errBody.message as string) ||
+              msg;
+          } catch {
+            if (rawText && rawText.length < 300) {
+              msg = rawText;
+            }
+          }
+        } catch {
+          // Ignore read error
+        }
         showToast(msg, "error");
         setProgress((p) => (p ? addLog(p, `❌ ${msg}`) : p));
         return;
