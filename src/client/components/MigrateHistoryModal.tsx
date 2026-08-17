@@ -9,6 +9,7 @@ import {
   useToast,
   type ModalController,
 } from "@/client/components";
+import { getActiveTenantId } from "@/client/lib/activeTenant";
 import { api } from "@/client/lib/api";
 
 type DeploymentData = Awaited<
@@ -30,7 +31,7 @@ interface MigrationResult {
 export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
   const { t } = useTranslation();
   const { toast } = useToast();
-  const account = modal.payload;
+  const account = modal?.payload;
 
   const [limit, setLimit] = useState<string>("100");
   const [status, setStatus] = useState<string>("all");
@@ -44,48 +45,118 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
 
   const handleClose = () => {
     if (running) return;
-    modal.close();
+    modal?.close();
     setTimeout(resetState, 300);
   };
 
   const startMigration = async () => {
-    if (!account) return;
+    if (!account?.id) return;
     setRunning(true);
     setResult(null);
 
+    const maxConversations = limit === "0" ? 0 : Number(limit);
+    let migrationResult: MigrationResult | null = null;
+    let errorMessage: string | null = null;
+
     try {
-      const maxConversations = limit === "0" ? 0 : Number(limit);
-      const { data, error } = await api.api.v1.chatwoot
-        .instances({ id: account.id })["migrate-history"]
-        .post({
-          maxConversations,
-          status: status as "all" | "open" | "pending" | "resolved" | "snoozed",
+      // 1. Try Eden Treaty typed call if available
+      try {
+        const clientRef = api as unknown as {
+          api?: {
+            v1?: {
+              chatwoot?: {
+                instances?: (params: { id: string }) => {
+                  "migrate-history"?: {
+                    post: (payload: {
+                      maxConversations: number;
+                      status: string;
+                    }) => Promise<{
+                      data?: { result?: MigrationResult };
+                      error?: unknown;
+                    }>;
+                  };
+                };
+              };
+            };
+          };
+        };
+
+        const targetInstance = clientRef.api?.v1?.chatwoot?.instances?.({
+          id: String(account.id),
         });
 
-      if (error) {
+        if (typeof targetInstance?.["migrate-history"]?.post === "function") {
+          const res = await targetInstance["migrate-history"].post({
+            maxConversations,
+            status,
+          });
+          if (res?.data?.result) {
+            migrationResult = res.data.result;
+          } else if (res?.error) {
+            const errObj = res.error as Record<string, unknown>;
+            errorMessage =
+              typeof errObj?.message === "string"
+                ? errObj.message
+                : String(res.error);
+          }
+        } else {
+          throw new Error("Eden method unavailable");
+        }
+      } catch {
+        // 2. Direct fetch fallback with active tenant header and credentials
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        const tenantId = getActiveTenantId();
+        if (tenantId) {
+          headers["X-Tenant-Id"] = tenantId;
+        }
+
+        const res = await fetch(
+          `/api/v1/chatwoot/instances/${account.id}/migrate-history`,
+          {
+            method: "POST",
+            headers,
+            credentials: "include",
+            body: JSON.stringify({
+              maxConversations,
+              status,
+            }),
+          },
+        );
+
+        if (!res.ok) {
+          const errBody = (await res.json().catch(() => ({}))) as Record<
+            string,
+            unknown
+          >;
+          errorMessage =
+            (errBody.error as string) ||
+            (errBody.message as string) ||
+            `Erro HTTP ${res.status}`;
+        } else {
+          const body = (await res.json()) as { result?: MigrationResult };
+          if (body?.result) {
+            migrationResult = body.result;
+          }
+        }
+      }
+
+      if (errorMessage) {
         toast({
           variant: "error",
           title: t("channels.migrateError", "Falha na migração de histórico"),
-          description:
-            typeof error === "object" && error !== null && "message" in error
-              ? String(error.message)
-              : t(
-                  "channels.migrateErrorDesc",
-                  "Não foi possível migrar as conversas.",
-                ),
+          description: errorMessage,
         });
-        return;
-      }
-
-      if (data && "result" in data) {
-        setResult(data.result as MigrationResult);
+      } else if (migrationResult) {
+        setResult(migrationResult);
         toast({
           variant: "success",
           title: t("channels.migrateSuccess", "Migração concluída!"),
           description: t(
             "channels.migrateSuccessDesc",
             "{{count}} mensagens foram importadas para a memória dos agentes.",
-            { count: data.result.messagesIngested },
+            { count: migrationResult.messagesIngested },
           ),
         });
       }
