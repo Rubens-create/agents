@@ -8,6 +8,11 @@ on:
   release:
     types: [released]
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
 
 env:
   # NOTE: Edition-aware image name derived from the repo it runs in. In the master this is
