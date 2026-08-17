@@ -138,7 +138,7 @@ const result = await Bun.build({
   plugins: [plugin],
   minify: true,
   target: "browser",
-  sourcemap: "none",
+  sourcemap: "linked",
   // NOTE: Force absolute asset paths so deep BrowserRouter routes (e.g.
   // /settings/profile) don't resolve "./index-abc.js" against the current
   // pathname and 404. Without this, Bun emits relative paths that only
