@@ -35,6 +35,7 @@ export { MediaImage } from "./MediaImage";
 export {
   MigrateHistoryModal,
   type MigrateHistoryModalProps,
+  type MigrationTarget,
 } from "./MigrateHistoryModal";
 export {
   Modal,

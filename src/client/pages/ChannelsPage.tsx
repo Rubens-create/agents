@@ -28,6 +28,7 @@ import {
   InboxRow,
   Input,
   MigrateHistoryModal,
+  type MigrationTarget,
   Modal,
   PageContainer,
   Skeleton,
@@ -222,7 +223,7 @@ export function ChannelsPage() {
 
   const connectModal = useModalController();
   const tokenModal = useModalController();
-  const migrateModal = useModalController<Account>();
+  const migrateModal = useModalController<MigrationTarget>();
   // The account picker (super-admin): choose which of the server's accounts this workspace answers.
   const manageModal = useModalController();
   // Strong confirmation (backup warning + re-typed name + password) for the two irreversible,
@@ -996,16 +997,21 @@ export function ChannelsPage() {
                         <Tooltip
                           content={t(
                             "channels.migrateConversations",
-                            "Migrar conversas do Chatwoot",
+                            "Migrar conversas da conta",
                           )}
                         >
                           <button
                             type="button"
-                            onClick={() => migrateModal.open(acct)}
+                            onClick={() =>
+                              migrateModal.open({
+                                instanceId: acct.id,
+                                accountId: acct.accountId,
+                              })
+                            }
                             disabled={busy}
                             aria-label={t(
                               "channels.migrateConversations",
-                              "Migrar conversas do Chatwoot",
+                              "Migrar conversas da conta",
                             )}
                             className="inline-flex shrink-0 items-center justify-center rounded p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-accent disabled:opacity-50"
                           >
@@ -1120,12 +1126,40 @@ export function ChannelsPage() {
                               )}
                             </span>
                           ) : (
-                            <InboxAgentPicker
-                              value={ib.agentId}
-                              agents={agents}
-                              label={t("channels.bindLabel", "Answering agent")}
-                              onChange={(agentId) => bindInbox(ib.id, agentId)}
-                            />
+                            <div className="flex items-center gap-2">
+                              <InboxAgentPicker
+                                value={ib.agentId}
+                                agents={agents}
+                                label={t("channels.bindLabel", "Answering agent")}
+                                onChange={(agentId) => bindInbox(ib.id, agentId)}
+                              />
+                              <Tooltip
+                                content={t(
+                                  "channels.migrateInboxAction",
+                                  "Migrar conversas deste canal",
+                                )}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    migrateModal.open({
+                                      instanceId: acct.id,
+                                      accountId: acct.accountId,
+                                      inboxId: ib.chatwootInboxId,
+                                      inboxName: ib.name,
+                                    })
+                                  }
+                                  disabled={busy}
+                                  aria-label={t(
+                                    "channels.migrateInboxAction",
+                                    "Migrar conversas deste canal",
+                                  )}
+                                  className="inline-flex shrink-0 items-center justify-center rounded p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-accent disabled:opacity-50"
+                                >
+                                  <History className="h-4 w-4" aria-hidden="true" />
+                                </button>
+                              </Tooltip>
+                            </div>
                           )}
                         </InboxRow>
                       ))}
