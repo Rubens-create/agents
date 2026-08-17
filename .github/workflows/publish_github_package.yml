@@ -118,6 +118,8 @@ jobs:
         run: |
           platform=${{ matrix.platform }}
           echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+          IMAGE_NAME="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
         if: matrix.builder != 'blacksmith'
@@ -147,9 +149,9 @@ jobs:
             BUN_PUBLIC_CDN_URL=${{ secrets.BUN_PUBLIC_CDN_URL }}
             BUN_PUBLIC_EDITION=${{ vars.BUN_PUBLIC_EDITION || 'full' }}
           tags: |
-            ${{ env.GITHUB_REPO }}:latest
-            ${{ env.GITHUB_REPO }}:${{ github.sha }}
-            ${{ env.GITHUB_REPO }}:${{ github.ref_name }}
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
           cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
 
@@ -168,9 +170,9 @@ jobs:
             BUN_PUBLIC_CDN_URL=${{ secrets.BUN_PUBLIC_CDN_URL }}
             BUN_PUBLIC_EDITION=${{ vars.BUN_PUBLIC_EDITION || 'full' }}
           tags: |
-            ${{ env.GITHUB_REPO }}:latest
-            ${{ env.GITHUB_REPO }}:${{ github.sha }}
-            ${{ env.GITHUB_REPO }}:${{ github.ref_name }}
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
 
       - name: Export digest
         run: |
@@ -195,6 +197,11 @@ jobs:
     # explicitly on build so the manifest is assembled whenever the build succeeded, R2 or not.
     if: always() && needs.build.result == 'success'
     steps:
+      - name: Prepare Image Name
+        run: |
+          IMAGE_NAME="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
+
       - name: Download digests
         uses: actions/download-artifact@v8
         with:
@@ -218,16 +225,16 @@ jobs:
           GIT_REF: ${{ github.head_ref || github.ref_name }}
         run: |
           docker buildx imagetools create \
-            -t ${{ env.GITHUB_REPO }}:latest \
-            -t ${{ env.GITHUB_REPO }}:${{ github.sha }} \
-            -t ${{ env.GITHUB_REPO }}:${GIT_REF} \
-            $(printf '${{ env.GITHUB_REPO }}@sha256:%s ' *)
+            -t ${{ env.IMAGE_NAME }}:latest \
+            -t ${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            -t ${{ env.IMAGE_NAME }}:${GIT_REF} \
+            $(printf '${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
       - name: Inspect image
         env:
           GIT_REF: ${{ github.head_ref || github.ref_name }}
         run: |
-          REPO="${{ env.GITHUB_REPO }}"
+          REPO="${{ env.IMAGE_NAME }}"
           docker buildx imagetools inspect ${REPO}:latest
           docker buildx imagetools inspect ${REPO}:${{ github.sha }}
           docker buildx imagetools inspect ${REPO}:${GIT_REF}
