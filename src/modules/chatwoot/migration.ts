@@ -2,7 +2,10 @@ import type { PrismaClient } from "@/../generated/prisma/client";
 import logger from "@/api/lib/logger";
 import basePrisma from "@/api/lib/prisma";
 import { contactInboxThreadId, resolveGraphThreadId } from "@/graph/checkpointer";
-import { ingestMessageIntoThread } from "@/graph/ingest";
+import {
+  type IngestBatchMessageItem,
+  ingestMessagesBatchIntoThread,
+} from "@/graph/ingest";
 import { type ChatwootClient } from "./client";
 import { loadChatwootClient } from "./instance";
 import { parseChatwootMessages } from "./messages";
@@ -97,17 +100,22 @@ function extractContactInboxId(raw: unknown): number | null {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
-// Fetch ALL message pages for a conversation by paginating backwards with `before`.
+// Fetch message pages for a conversation by paginating backwards with `before`.
+// Deduplicates IDs immediately and stops as soon as a duplicate page is returned or messages end.
 async function fetchAllMessages(
   client: ChatwootClient,
   conversationId: number,
 ): Promise<unknown[]> {
   const allMessages: unknown[] = [];
+  const seenIds = new Set<number>();
   let before: number | undefined;
-  const MAX_PAGES = 200; // safety cap
+  const MAX_PAGES = 50; // safety cap
 
   for (let i = 0; i < MAX_PAGES; i++) {
-    const raw = await client.getMessages(conversationId, before != null ? { before } : undefined);
+    const raw = await client.getMessages(
+      conversationId,
+      before != null ? { before } : undefined,
+    );
     const page: unknown[] = Array.isArray(raw)
       ? raw
       : raw &&
@@ -118,23 +126,127 @@ async function fetchAllMessages(
 
     if (page.length === 0) break;
 
-    allMessages.push(...page);
-
-    // Find the smallest message id in this page to use as the `before` cursor
+    let newMessagesInPage = 0;
     let minId = Infinity;
+
     for (const item of page) {
       if (item && typeof item === "object") {
         const id = Number((item as { id?: unknown }).id);
-        if (Number.isInteger(id) && id < minId) {
-          minId = id;
+        if (Number.isInteger(id) && id > 0) {
+          if (!seenIds.has(id)) {
+            seenIds.add(id);
+            allMessages.push(item);
+            newMessagesInPage++;
+          }
+          if (id < minId) {
+            minId = id;
+          }
         }
       }
     }
-    if (minId === Infinity || page.length < 20) break; // last page
+
+    // Stop if no new messages were added (server does not support `before` and repeated the same page),
+    // or if minId did not strictly decrease, or if the page has fewer than 20 items (last page reached).
+    if (
+      newMessagesInPage === 0 ||
+      minId === Infinity ||
+      minId === before ||
+      page.length < 20
+    ) {
+      break;
+    }
     before = minId;
   }
 
   return allMessages;
+}
+
+// Build batch message items from raw Chatwoot messages for atomic ingestion
+function prepareBatchItems(
+  rawList: unknown[],
+  parsedRows: ReturnType<typeof parseChatwootMessages>,
+): IngestBatchMessageItem[] {
+  const rawMap = new Map<number, Record<string, unknown>>();
+  for (const item of rawList) {
+    if (item && typeof item === "object") {
+      const o = item as { id?: unknown };
+      const id = Number(o.id);
+      if (Number.isInteger(id)) {
+        rawMap.set(id, item as Record<string, unknown>);
+      }
+    }
+  }
+
+  // Build quote resolver for in-reply-to rendering
+  const idToText = new Map<number, string>();
+  for (const m of parsedRows) {
+    const text = m.transcribedText || m.content;
+    if (text) idToText.set(m.id, text);
+  }
+  const resolveQuoted = (quotedId: number) => idToText.get(quotedId) ?? null;
+
+  // Sort messages by id ascending
+  const sorted = [...parsedRows].sort((a, b) => a.id - b.id);
+  const items: IngestBatchMessageItem[] = [];
+
+  for (const msg of sorted) {
+    if (
+      msg.private ||
+      msg.messageType === "activity" ||
+      msg.messageType === "other"
+    ) {
+      continue;
+    }
+
+    const rawItem = rawMap.get(msg.id);
+    const senderObj = rawItem?.sender as
+      | { name?: unknown; type?: unknown }
+      | undefined;
+    const senderName =
+      typeof senderObj?.name === "string" && senderObj.name.trim()
+        ? senderObj.name.trim()
+        : null;
+
+    if (msg.messageType === "incoming") {
+      const renderedText = renderInboundMessage(
+        {
+          text: msg.content,
+          transcribedText: msg.transcribedText,
+          imageDescription: msg.imageDescription,
+          extractedText: msg.extractedText,
+          attachmentTypes: msg.attachmentTypes,
+          attachmentName: msg.attachmentName,
+          location: msg.location,
+          inReplyTo: msg.inReplyTo,
+          isReaction: msg.isReaction,
+        },
+        { resolveQuoted },
+      );
+
+      if (renderedText.trim()) {
+        items.push({
+          messageId: msg.id,
+          role: "customer",
+          text: renderedText,
+        });
+      }
+    } else if (
+      msg.messageType === "outgoing" ||
+      msg.messageType === "template"
+    ) {
+      const text = msg.content.trim();
+      if (text) {
+        items.push({
+          messageId: msg.id,
+          role: "human_agent",
+          text,
+          agentName: senderName || "Atendente",
+        });
+      }
+    }
+  }
+
+  return items;
 }
 
 export async function migrateChatwootInstanceHistory(
@@ -179,7 +291,7 @@ export async function migrateChatwootInstanceHistory(
 
       const pageConvs = parseConversationsResponse(rawRes);
       if (pageConvs.length === 0) {
-        break; // No more conversations
+        break;
       }
 
       for (const conv of pageConvs) {
@@ -194,7 +306,6 @@ export async function migrateChatwootInstanceHistory(
       }
 
       page++;
-      // Safety limit to avoid infinite pagination loops
       if (page > 500) break;
     } catch (err) {
       logger.error(
@@ -217,15 +328,12 @@ export async function migrateChatwootInstanceHistory(
   for (const conv of conversationsToProcess) {
     result.conversationsProcessed++;
 
-    // Resolve contactInboxId: if the list response didn't include it, fetch the
-    // individual conversation detail (which DOES include contact_inbox).
     let contactInboxId = conv.contactInboxId;
     if (contactInboxId == null) {
       try {
         const detail = await client.getConversation(conv.id);
         contactInboxId = extractContactInboxId(detail);
       } catch {
-        // Non-fatal: fall back to per-conversation thread keying
         logger.debug(
           "Could not fetch conversation %d detail for contact_inbox; falling back to per-conversation thread",
           conv.id,
@@ -241,109 +349,22 @@ export async function migrateChatwootInstanceHistory(
     );
 
     try {
-      // Fetch ALL message pages (not just the most recent ~20)
       const rawList = await fetchAllMessages(client, conv.id);
       const parsedRows = parseChatwootMessages(rawList);
+      const batchItems = prepareBatchItems(rawList, parsedRows);
 
-      const rawMap = new Map<number, Record<string, unknown>>();
-      for (const item of rawList) {
-        if (item && typeof item === "object") {
-          const o = item as { id?: unknown };
-          const id = Number(o.id);
-          if (Number.isInteger(id)) {
-            rawMap.set(id, item as Record<string, unknown>);
-          }
-        }
-      }
+      const { ingested, skipped } = await ingestMessagesBatchIntoThread({
+        tenantId,
+        instanceId,
+        conversationId: conv.id,
+        contactInboxId: contactInboxId ?? conv.id,
+        graphThreadId,
+        messages: batchItems,
+        base,
+      });
 
-      // Build quote resolver for in-reply-to rendering
-      const idToText = new Map<number, string>();
-      for (const m of parsedRows) {
-        const text = m.transcribedText || m.content;
-        if (text) idToText.set(m.id, text);
-      }
-      const resolveQuoted = (quotedId: number) => idToText.get(quotedId) ?? null;
-
-      // Sort messages by id ascending so the watermark advances monotonically
-      parsedRows.sort((a, b) => a.id - b.id);
-
-      for (const msg of parsedRows) {
-        // Skip activity or private internal notes
-        if (msg.private || msg.messageType === "activity" || msg.messageType === "other") {
-          continue;
-        }
-
-        const rawItem = rawMap.get(msg.id);
-        const senderObj = rawItem?.sender as
-          | { name?: unknown; type?: unknown }
-          | undefined;
-        const senderName =
-          typeof senderObj?.name === "string" && senderObj.name.trim()
-            ? senderObj.name.trim()
-            : null;
-
-        if (msg.messageType === "incoming") {
-          const renderedText = renderInboundMessage(
-            {
-              text: msg.content,
-              transcribedText: msg.transcribedText,
-              imageDescription: msg.imageDescription,
-              extractedText: msg.extractedText,
-              attachmentTypes: msg.attachmentTypes,
-              attachmentName: msg.attachmentName,
-              location: msg.location,
-              inReplyTo: msg.inReplyTo,
-              isReaction: msg.isReaction,
-            },
-            { resolveQuoted },
-          );
-
-          if (!renderedText.trim()) continue;
-
-          const ingestStatus = await ingestMessageIntoThread({
-            tenantId,
-            instanceId,
-            conversationId: conv.id,
-            contactInboxId: contactInboxId ?? conv.id,
-            graphThreadId,
-            messageId: msg.id,
-            role: "customer",
-            text: renderedText,
-            base,
-          });
-
-          if (ingestStatus === "ingested") {
-            result.messagesIngested++;
-          } else {
-            result.messagesSkipped++;
-          }
-        } else if (
-          msg.messageType === "outgoing" ||
-          msg.messageType === "template"
-        ) {
-          const text = msg.content.trim();
-          if (!text) continue;
-
-          const ingestStatus = await ingestMessageIntoThread({
-            tenantId,
-            instanceId,
-            conversationId: conv.id,
-            contactInboxId: contactInboxId ?? conv.id,
-            graphThreadId,
-            messageId: msg.id,
-            role: "human_agent",
-            text,
-            agentName: senderName || "Atendente",
-            base,
-          });
-
-          if (ingestStatus === "ingested") {
-            result.messagesIngested++;
-          } else {
-            result.messagesSkipped++;
-          }
-        }
-      }
+      result.messagesIngested += ingested;
+      result.messagesSkipped += skipped;
     } catch (convErr) {
       const errMsg =
         convErr instanceof Error ? convErr.message : String(convErr);
@@ -443,7 +464,7 @@ export function startChatwootMigrationTask(
   };
   activeMigrationTasks.set(key, state);
 
-  // Run in background asynchronously
+  // Run in background asynchronously with high performance batching
   (async () => {
     const base = options.base ?? basePrisma;
     const loader = options.loadClient ?? loadChatwootClient;
@@ -516,7 +537,7 @@ export function startChatwootMigrationTask(
     state.phase = "processing";
     state.logs.push(`📋 ${conversationsToProcess.length} conversas encontradas`);
 
-    // 2. Process each conversation
+    // 2. Process each conversation in high-speed batches
     for (const conv of conversationsToProcess) {
       result.conversationsProcessed++;
       state.currentIndex = result.conversationsProcessed;
@@ -524,9 +545,6 @@ export function startChatwootMigrationTask(
       state.logs.push(
         `💬 Conversa #${conv.id} (${result.conversationsProcessed}/${conversationsToProcess.length})...`,
       );
-
-      let convIngested = 0;
-      let convSkipped = 0;
 
       // Resolve contactInboxId
       let contactInboxId = conv.contactInboxId;
@@ -552,112 +570,25 @@ export function startChatwootMigrationTask(
       try {
         const rawList = await fetchAllMessages(client, conv.id);
         const parsedRows = parseChatwootMessages(rawList);
+        const batchItems = prepareBatchItems(rawList, parsedRows);
 
-        const rawMap = new Map<number, Record<string, unknown>>();
-        for (const item of rawList) {
-          if (item && typeof item === "object") {
-            const o = item as { id?: unknown };
-            const id = Number(o.id);
-            if (Number.isInteger(id)) {
-              rawMap.set(id, item as Record<string, unknown>);
-            }
-          }
-        }
+        const { ingested, skipped } = await ingestMessagesBatchIntoThread({
+          tenantId,
+          instanceId,
+          conversationId: conv.id,
+          contactInboxId: contactInboxId ?? conv.id,
+          graphThreadId,
+          messages: batchItems,
+          base,
+        });
 
-        const idToText = new Map<number, string>();
-        for (const m of parsedRows) {
-          const text = m.transcribedText || m.content;
-          if (text) idToText.set(m.id, text);
-        }
-        const resolveQuoted = (quotedId: number) => idToText.get(quotedId) ?? null;
-
-        parsedRows.sort((a, b) => a.id - b.id);
-
-        for (const msg of parsedRows) {
-          if (msg.private || msg.messageType === "activity" || msg.messageType === "other") {
-            continue;
-          }
-
-          const rawItem = rawMap.get(msg.id);
-          const senderObj = rawItem?.sender as
-            | { name?: unknown; type?: unknown }
-            | undefined;
-          const senderName =
-            typeof senderObj?.name === "string" && senderObj.name.trim()
-              ? senderObj.name.trim()
-              : null;
-
-          if (msg.messageType === "incoming") {
-            const renderedText = renderInboundMessage(
-              {
-                text: msg.content,
-                transcribedText: msg.transcribedText,
-                imageDescription: msg.imageDescription,
-                extractedText: msg.extractedText,
-                attachmentTypes: msg.attachmentTypes,
-                attachmentName: msg.attachmentName,
-                location: msg.location,
-                inReplyTo: msg.inReplyTo,
-                isReaction: msg.isReaction,
-              },
-              { resolveQuoted },
-            );
-
-            if (!renderedText.trim()) continue;
-
-            const ingestStatus = await ingestMessageIntoThread({
-              tenantId,
-              instanceId,
-              conversationId: conv.id,
-              contactInboxId: contactInboxId ?? conv.id,
-              graphThreadId,
-              messageId: msg.id,
-              role: "customer",
-              text: renderedText,
-              base,
-            });
-
-            if (ingestStatus === "ingested") {
-              result.messagesIngested++;
-              convIngested++;
-            } else {
-              result.messagesSkipped++;
-              convSkipped++;
-            }
-          } else if (
-            msg.messageType === "outgoing" ||
-            msg.messageType === "template"
-          ) {
-            const text = msg.content.trim();
-            if (!text) continue;
-
-            const ingestStatus = await ingestMessageIntoThread({
-              tenantId,
-              instanceId,
-              conversationId: conv.id,
-              contactInboxId: contactInboxId ?? conv.id,
-              graphThreadId,
-              messageId: msg.id,
-              role: "human_agent",
-              text,
-              agentName: senderName || "Atendente",
-              base,
-            });
-
-            if (ingestStatus === "ingested") {
-              result.messagesIngested++;
-              convIngested++;
-            } else {
-              result.messagesSkipped++;
-              convSkipped++;
-            }
-          }
-        }
+        result.messagesIngested += ingested;
+        result.messagesSkipped += skipped;
 
         state.messagesIngested = result.messagesIngested;
         state.messagesSkipped = result.messagesSkipped;
         state.logs.push(
-          `   ✓ #${conv.id}: ${convIngested} ingeridas, ${convSkipped} já existiam`,
+          `   ✓ #${conv.id}: ${ingested} ingeridas, ${skipped} já existiam`,
         );
       } catch (convErr) {
         const errMsg =

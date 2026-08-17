@@ -164,3 +164,115 @@ export async function ingestMessageIntoThread(
     }),
   );
 }
+
+export interface IngestBatchMessageItem {
+  messageId: number;
+  role: IngestRole;
+  text: string;
+  agentName?: string | null;
+}
+
+export interface IngestBatchParams {
+  tenantId: bigint;
+  instanceId: bigint;
+  conversationId: number;
+  contactInboxId: number;
+  graphThreadId: string;
+  messages: IngestBatchMessageItem[];
+  base?: PrismaClient;
+  checkpointer?: BaseCheckpointSaver;
+}
+
+export async function ingestMessagesBatchIntoThread(
+  params: IngestBatchParams,
+): Promise<{ ingested: number; skipped: number }> {
+  const base = params.base ?? basePrisma;
+  const {
+    tenantId,
+    instanceId,
+    conversationId,
+    contactInboxId,
+    graphThreadId,
+    messages,
+  } = params;
+
+  const validMessages = messages
+    .filter((m) => m.text.trim())
+    .sort((a, b) => a.messageId - b.messageId);
+
+  if (validMessages.length === 0) {
+    return { ingested: 0, skipped: messages.length };
+  }
+
+  const checkpointer = params.checkpointer ?? (await getCheckpointer());
+  const graph = buildIngestGraph(checkpointer);
+
+  return runScopedOn(base, sysCtx(tenantId), (db) =>
+    withEntityLock(db, `ingest:${graphThreadId}`, async () => {
+      const key = {
+        tenantId_chatwootInstanceId_contactInboxId: {
+          tenantId,
+          chatwootInstanceId: instanceId,
+          contactInboxId,
+        },
+      };
+      const row = await db.agentThread.findUnique({
+        where: key,
+        select: { lastSyncedMessageId: true, lastConversationId: true },
+      });
+
+      const watermark = row?.lastSyncedMessageId ?? -1;
+      const toIngest = validMessages.filter((m) => m.messageId > watermark);
+      const skipped = messages.length - toIngest.length;
+
+      if (toIngest.length === 0) {
+        return { ingested: 0, skipped };
+      }
+
+      const prevConv = row?.lastConversationId ?? null;
+      let isNewConvMarkerNeeded =
+        prevConv != null && prevConv !== conversationId;
+
+      const lcMessages = toIngest.map((m) => {
+        if (m.role === "human_agent") {
+          const body = `<atendente${m.agentName ? ` nome="${sanitizeName(m.agentName)}"` : ""}>\n${m.text}\n</atendente>`;
+          return new AIMessage(body);
+        } else {
+          let body = m.text;
+          if (isNewConvMarkerNeeded) {
+            body = `${CONVERSATION_DIVIDER}\n\n${m.text}`;
+            isNewConvMarkerNeeded = false; // only attach to first customer message in new conversation
+          }
+          return new HumanMessage(body);
+        }
+      });
+
+      await graph.updateState(
+        { configurable: { thread_id: graphThreadId } },
+        { messages: lcMessages },
+        "noop",
+      );
+
+      const maxMessageId = toIngest[toIngest.length - 1].messageId;
+      const hasCustomerMessage = toIngest.some((m) => m.role === "customer");
+
+      await db.agentThread.upsert({
+        where: key,
+        create: {
+          tenantId,
+          chatwootInstanceId: instanceId,
+          contactInboxId,
+          threadId: graphThreadId,
+          lastSyncedMessageId: maxMessageId,
+          ...(hasCustomerMessage ? { lastConversationId: conversationId } : {}),
+        },
+        update: {
+          lastSyncedMessageId: maxMessageId,
+          ...(hasCustomerMessage ? { lastConversationId: conversationId } : {}),
+        },
+      });
+
+      return { ingested: toIngest.length, skipped };
+    }),
+  );
+}
