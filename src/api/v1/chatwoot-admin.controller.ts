@@ -32,7 +32,11 @@ import {
   softDisconnectChatwootInstance,
   syncInboxes,
 } from "@/modules/chatwoot/management";
-import { migrateChatwootInstanceHistory, migrateChatwootInstanceHistoryStream } from "@/modules/chatwoot/migration";
+import {
+  getMigrationTaskStatus,
+  migrateChatwootInstanceHistory,
+  startChatwootMigrationTask,
+} from "@/modules/chatwoot/migration";
 
 // Chatwoot instance + inbox management (per-tenant). TENANT_ADMIN. SEPARATE from the public webhook
 // receiver controller (same /v1/chatwoot prefix; no path overlap: /instances* + /inboxes* here vs
@@ -553,81 +557,58 @@ export const chatwootAdminController = new Elysia({
       response: errors(400, 401, 403, 404, 409, 502),
     },
   )
-  // Migrate historical conversations from Chatwoot into the LangGraph checkpointer memory.
+  // Get current status and live logs of the background migration task
+  .get(
+    "/instances/:id/migrate-history/status",
+    async ({ tenantContext, params }) => {
+      const ctx = ctxOrThrow(tenantContext);
+      const status = getMigrationTaskStatus(ctx.tenantId, BigInt(params.id));
+      return {
+        instance: instanceIdentity,
+        status,
+      };
+    },
+    {
+      requireRole: "TENANT_ADMIN",
+      detail: doc(
+        "Get Chatwoot migration status",
+        "Returns the live progress, logs, and outcome of the Chatwoot history migration task.",
+      ),
+      params: t.Object({
+        id: t.String({ description: "ChatwootInstance id (BigInt string)." }),
+      }),
+      response: errors(400, 401, 403, 404),
+    },
+  )
+  // Trigger history migration as a tracked background task (returns immediately, polled via /status)
   .post(
     "/instances/:id/migrate-history",
-    async ({ tenantContext, params, body, request }) => {
+    async ({ tenantContext, params, body }) => {
       const ctx = ctxOrThrow(tenantContext);
       const b = (body ?? {}) as {
         maxConversations?: number;
         status?: "all" | "open" | "pending" | "resolved" | "snoozed";
         inboxId?: number;
       };
-      const opts = {
-        maxConversations: b.maxConversations,
-        status: b.status,
-        inboxId: b.inboxId,
-      };
-
-      // Stream NDJSON progress events when the client requests it
-      const wantsStream = request.headers.get("accept")?.includes("text/event-stream");
-      if (wantsStream) {
-        const gen = migrateChatwootInstanceHistoryStream(
-          ctx.tenantId,
-          BigInt(params.id),
-          opts,
-        );
-        const encoder = new TextEncoder();
-        const stream = new ReadableStream({
-          async start(controller) {
-            try {
-              for await (const event of gen) {
-                controller.enqueue(
-                  encoder.encode(JSON.stringify(event) + "\n"),
-                );
-              }
-              controller.close();
-            } catch (err) {
-              const errMsg =
-                err instanceof Error ? err.message : String(err);
-              controller.enqueue(
-                encoder.encode(
-                  JSON.stringify({
-                    type: "conversation_error",
-                    conversationId: 0,
-                    error: errMsg,
-                  }) + "\n",
-                ),
-              );
-              controller.close();
-            }
-          },
-        });
-        return new Response(stream, {
-          headers: {
-            "content-type": "text/event-stream; charset=utf-8",
-            "cache-control": "no-cache, no-transform",
-            "x-accel-buffering": "no",
-          },
-        });
-      }
-
-      // Fallback: synchronous response
-      const result = await migrateChatwootInstanceHistory(
+      const status = startChatwootMigrationTask(
         ctx.tenantId,
         BigInt(params.id),
-        opts,
+        {
+          maxConversations: b.maxConversations,
+          status: b.status,
+          inboxId: b.inboxId,
+        },
       );
       return {
         instance: instanceIdentity,
-        result,
+        status,
       };
     },
     {
       requireRole: "TENANT_ADMIN",
       detail: doc(
-        "Migrate Chatwoot history",
-        "Pulls conversation history from Chatwoot and ingests it into LangGraph checkpointer memory.",
+        "Start Chatwoot history migration",
+        "Starts pulling conversation history from Chatwoot in the background and ingests it into LangGraph checkpointer memory.",
       ),
       params: t.Object({
         id: t.String({ description: "ChatwootInstance id (BigInt string)." }),

@@ -369,278 +369,329 @@ export async function migrateChatwootInstanceHistory(
   return result;
 }
 
-// Progress event types for streaming migration
-export type MigrationProgressEvent =
-  | { type: "discovery"; totalConversations: number }
-  | { type: "conversation_start"; conversationId: number; index: number; total: number }
-  | { type: "conversation_done"; conversationId: number; ingested: number; skipped: number }
-  | { type: "conversation_error"; conversationId: number; error: string }
-  | { type: "complete"; result: MigrateHistoryResult };
+// Progress state tracked for background migration jobs
+export interface MigrationTaskState {
+  instanceId: string;
+  running: boolean;
+  phase: "idle" | "discovering" | "processing" | "done" | "error";
+  totalConversations: number;
+  currentIndex: number;
+  currentConversationId: number | null;
+  messagesIngested: number;
+  messagesSkipped: number;
+  errorsCount: number;
+  logs: string[];
+  result: MigrateHistoryResult | null;
+  error?: string | null;
+  startedAt?: string;
+  finishedAt?: string;
+}
 
-// Streaming version of migrateChatwootInstanceHistory that yields progress events as each
-// conversation is processed, so the client can show live progress instead of waiting for the
-// entire operation to finish.
-export async function* migrateChatwootInstanceHistoryStream(
+const activeMigrationTasks = new Map<string, MigrationTaskState>();
+
+function taskKey(tenantId: bigint, instanceId: bigint): string {
+  return `${tenantId}:${instanceId}`;
+}
+
+export function getMigrationTaskStatus(
+  tenantId: bigint,
+  instanceId: bigint,
+): MigrationTaskState {
+  const key = taskKey(tenantId, instanceId);
+  const existing = activeMigrationTasks.get(key);
+  if (existing) return existing;
+
+  return {
+    instanceId: String(instanceId),
+    running: false,
+    phase: "idle",
+    totalConversations: 0,
+    currentIndex: 0,
+    currentConversationId: null,
+    messagesIngested: 0,
+    messagesSkipped: 0,
+    errorsCount: 0,
+    logs: [],
+    result: null,
+  };
+}
+
+export function startChatwootMigrationTask(
   tenantId: bigint,
   instanceId: bigint,
   options: MigrateHistoryOptions = {},
-): AsyncGenerator<MigrationProgressEvent> {
-  const base = options.base ?? basePrisma;
-  const loader = options.loadClient ?? loadChatwootClient;
-  let client: ChatwootClient;
-  try {
-    client = await loader(tenantId, instanceId);
-  } catch (loadErr) {
-    const errMsg =
-      loadErr instanceof Error ? loadErr.message : String(loadErr);
-    logger.error(
-      "Failed to load Chatwoot client for instance %s: %s",
-      String(instanceId),
-      errMsg,
-    );
-    yield { type: "conversation_error", conversationId: 0, error: errMsg };
-    yield {
-      type: "complete",
-      result: {
-        instanceId: String(instanceId),
-        conversationsProcessed: 0,
-        messagesIngested: 0,
-        messagesSkipped: 0,
-        errors: [{ conversationId: 0, error: errMsg }],
-      },
-    };
-    return;
+): MigrationTaskState {
+  const key = taskKey(tenantId, instanceId);
+  const current = activeMigrationTasks.get(key);
+  if (current?.running) {
+    return current;
   }
 
-  const statusFilter = options.status ?? "all";
-  const maxConvs = options.maxConversations ?? 0;
-
-  const result: MigrateHistoryResult = {
+  const state: MigrationTaskState = {
     instanceId: String(instanceId),
-    conversationsProcessed: 0,
+    running: true,
+    phase: "discovering",
+    totalConversations: 0,
+    currentIndex: 0,
+    currentConversationId: null,
     messagesIngested: 0,
     messagesSkipped: 0,
-    errors: [],
+    errorsCount: 0,
+    logs: ["Conectando ao Chatwoot e buscando conversas..."],
+    result: null,
+    startedAt: new Date().toISOString(),
   };
+  activeMigrationTasks.set(key, state);
 
-  logger.info(
-    "Starting Chatwoot history migration [stream] (tenant=%s, instance=%s, maxConversations=%d, status=%s)",
-    String(tenantId),
-    String(instanceId),
-    maxConvs,
-    statusFilter,
-  );
-
-  let page = 1;
-  const conversationsToProcess: ParsedConversation[] = [];
-
-  // 1. Fetch conversations with pagination
-  while (true) {
+  // Run in background asynchronously
+  (async () => {
+    const base = options.base ?? basePrisma;
+    const loader = options.loadClient ?? loadChatwootClient;
+    let client: ChatwootClient;
     try {
-      const rawRes = await client.listConversations({
-        page,
-        status: statusFilter === "all" ? undefined : statusFilter,
-        inboxId: options.inboxId,
-      });
-
-      const pageConvs = parseConversationsResponse(rawRes);
-      if (pageConvs.length === 0) break;
-
-      for (const conv of pageConvs) {
-        conversationsToProcess.push(conv);
-        if (maxConvs > 0 && conversationsToProcess.length >= maxConvs) break;
-      }
-
-      if (maxConvs > 0 && conversationsToProcess.length >= maxConvs) break;
-
-      page++;
-      if (page > 500) break;
-    } catch (err) {
-      logger.error(
-        "Failed fetching conversations page %d on Chatwoot instance %s: %s",
-        page,
-        String(instanceId),
-        err instanceof Error ? err.message : String(err),
-      );
-      break;
-    }
-  }
-
-  logger.info(
-    "Discovered %d conversations for history migration [stream] on instance %s",
-    conversationsToProcess.length,
-    String(instanceId),
-  );
-
-  yield { type: "discovery", totalConversations: conversationsToProcess.length };
-
-  // 2. Process each conversation
-  for (const conv of conversationsToProcess) {
-    result.conversationsProcessed++;
-    let convIngested = 0;
-    let convSkipped = 0;
-
-    yield {
-      type: "conversation_start",
-      conversationId: conv.id,
-      index: result.conversationsProcessed - 1,
-      total: conversationsToProcess.length,
-    };
-
-    // Resolve contactInboxId
-    let contactInboxId = conv.contactInboxId;
-    if (contactInboxId == null) {
-      try {
-        const detail = await client.getConversation(conv.id);
-        contactInboxId = extractContactInboxId(detail);
-      } catch {
-        logger.debug(
-          "Could not fetch conversation %d detail for contact_inbox; falling back to per-conversation thread",
-          conv.id,
-        );
-      }
-    }
-
-    const graphThreadId = resolveGraphThreadId(
-      tenantId,
-      instanceId,
-      conv.id,
-      contactInboxId,
-    );
-
-    try {
-      const rawList = await fetchAllMessages(client, conv.id);
-      const parsedRows = parseChatwootMessages(rawList);
-
-      const rawMap = new Map<number, Record<string, unknown>>();
-      for (const item of rawList) {
-        if (item && typeof item === "object") {
-          const o = item as { id?: unknown };
-          const id = Number(o.id);
-          if (Number.isInteger(id)) {
-            rawMap.set(id, item as Record<string, unknown>);
-          }
-        }
-      }
-
-      const idToText = new Map<number, string>();
-      for (const m of parsedRows) {
-        const text = m.transcribedText || m.content;
-        if (text) idToText.set(m.id, text);
-      }
-      const resolveQuoted = (quotedId: number) => idToText.get(quotedId) ?? null;
-
-      parsedRows.sort((a, b) => a.id - b.id);
-
-      for (const msg of parsedRows) {
-        if (msg.private || msg.messageType === "activity" || msg.messageType === "other") {
-          continue;
-        }
-
-        const rawItem = rawMap.get(msg.id);
-        const senderObj = rawItem?.sender as
-          | { name?: unknown; type?: unknown }
-          | undefined;
-        const senderName =
-          typeof senderObj?.name === "string" && senderObj.name.trim()
-            ? senderObj.name.trim()
-            : null;
-
-        if (msg.messageType === "incoming") {
-          const renderedText = renderInboundMessage(
-            {
-              text: msg.content,
-              transcribedText: msg.transcribedText,
-              imageDescription: msg.imageDescription,
-              extractedText: msg.extractedText,
-              attachmentTypes: msg.attachmentTypes,
-              attachmentName: msg.attachmentName,
-              location: msg.location,
-              inReplyTo: msg.inReplyTo,
-              isReaction: msg.isReaction,
-            },
-            { resolveQuoted },
-          );
-
-          if (!renderedText.trim()) continue;
-
-          const ingestStatus = await ingestMessageIntoThread({
-            tenantId,
-            instanceId,
-            conversationId: conv.id,
-            contactInboxId: contactInboxId ?? conv.id,
-            graphThreadId,
-            messageId: msg.id,
-            role: "customer",
-            text: renderedText,
-            base,
-          });
-
-          if (ingestStatus === "ingested") {
-            result.messagesIngested++;
-            convIngested++;
-          } else {
-            result.messagesSkipped++;
-            convSkipped++;
-          }
-        } else if (
-          msg.messageType === "outgoing" ||
-          msg.messageType === "template"
-        ) {
-          const text = msg.content.trim();
-          if (!text) continue;
-
-          const ingestStatus = await ingestMessageIntoThread({
-            tenantId,
-            instanceId,
-            conversationId: conv.id,
-            contactInboxId: contactInboxId ?? conv.id,
-            graphThreadId,
-            messageId: msg.id,
-            role: "human_agent",
-            text,
-            agentName: senderName || "Atendente",
-            base,
-          });
-
-          if (ingestStatus === "ingested") {
-            result.messagesIngested++;
-            convIngested++;
-          } else {
-            result.messagesSkipped++;
-            convSkipped++;
-          }
-        }
-      }
-
-      yield {
-        type: "conversation_done",
-        conversationId: conv.id,
-        ingested: convIngested,
-        skipped: convSkipped,
-      };
-    } catch (convErr) {
+      client = await loader(tenantId, instanceId);
+    } catch (loadErr) {
       const errMsg =
-        convErr instanceof Error ? convErr.message : String(convErr);
-      logger.warn(
-        "Error migrating conversation %d on instance %s: %s",
-        conv.id,
+        loadErr instanceof Error ? loadErr.message : String(loadErr);
+      logger.error(
+        "Failed to load Chatwoot client for instance %s: %s",
         String(instanceId),
         errMsg,
       );
-      result.errors.push({ conversationId: conv.id, error: errMsg });
-      yield { type: "conversation_error", conversationId: conv.id, error: errMsg };
+      state.running = false;
+      state.phase = "error";
+      state.error = errMsg;
+      state.logs.push(`❌ Erro ao conectar ao Chatwoot: ${errMsg}`);
+      state.finishedAt = new Date().toISOString();
+      return;
     }
-  }
 
-  logger.info(
-    "Finished Chatwoot history migration [stream] for instance %s: %d convs processed, %d messages ingested, %d skipped, %d errors",
-    String(instanceId),
-    result.conversationsProcessed,
-    result.messagesIngested,
-    result.messagesSkipped,
-    result.errors.length,
-  );
+    const statusFilter = options.status ?? "all";
+    const maxConvs = options.maxConversations ?? 0;
 
-  yield { type: "complete", result };
+    const result: MigrateHistoryResult = {
+      instanceId: String(instanceId),
+      conversationsProcessed: 0,
+      messagesIngested: 0,
+      messagesSkipped: 0,
+      errors: [],
+    };
+
+    let page = 1;
+    const conversationsToProcess: ParsedConversation[] = [];
+
+    // 1. Fetch conversations with pagination
+    while (true) {
+      try {
+        const rawRes = await client.listConversations({
+          page,
+          status: statusFilter === "all" ? undefined : statusFilter,
+          inboxId: options.inboxId,
+        });
+
+        const pageConvs = parseConversationsResponse(rawRes);
+        if (pageConvs.length === 0) break;
+
+        for (const conv of pageConvs) {
+          conversationsToProcess.push(conv);
+          if (maxConvs > 0 && conversationsToProcess.length >= maxConvs) break;
+        }
+
+        if (maxConvs > 0 && conversationsToProcess.length >= maxConvs) break;
+
+        page++;
+        if (page > 500) break;
+      } catch (err) {
+        logger.error(
+          "Failed fetching conversations page %d on Chatwoot instance %s: %s",
+          page,
+          String(instanceId),
+          err instanceof Error ? err.message : String(err),
+        );
+        break;
+      }
+    }
+
+    state.totalConversations = conversationsToProcess.length;
+    state.phase = "processing";
+    state.logs.push(`📋 ${conversationsToProcess.length} conversas encontradas`);
+
+    // 2. Process each conversation
+    for (const conv of conversationsToProcess) {
+      result.conversationsProcessed++;
+      state.currentIndex = result.conversationsProcessed;
+      state.currentConversationId = conv.id;
+      state.logs.push(
+        `💬 Conversa #${conv.id} (${result.conversationsProcessed}/${conversationsToProcess.length})...`,
+      );
+
+      let convIngested = 0;
+      let convSkipped = 0;
+
+      // Resolve contactInboxId
+      let contactInboxId = conv.contactInboxId;
+      if (contactInboxId == null) {
+        try {
+          const detail = await client.getConversation(conv.id);
+          contactInboxId = extractContactInboxId(detail);
+        } catch {
+          logger.debug(
+            "Could not fetch conversation %d detail for contact_inbox; falling back to per-conversation thread",
+            conv.id,
+          );
+        }
+      }
+
+      const graphThreadId = resolveGraphThreadId(
+        tenantId,
+        instanceId,
+        conv.id,
+        contactInboxId,
+      );
+
+      try {
+        const rawList = await fetchAllMessages(client, conv.id);
+        const parsedRows = parseChatwootMessages(rawList);
+
+        const rawMap = new Map<number, Record<string, unknown>>();
+        for (const item of rawList) {
+          if (item && typeof item === "object") {
+            const o = item as { id?: unknown };
+            const id = Number(o.id);
+            if (Number.isInteger(id)) {
+              rawMap.set(id, item as Record<string, unknown>);
+            }
+          }
+        }
+
+        const idToText = new Map<number, string>();
+        for (const m of parsedRows) {
+          const text = m.transcribedText || m.content;
+          if (text) idToText.set(m.id, text);
+        }
+        const resolveQuoted = (quotedId: number) => idToText.get(quotedId) ?? null;
+
+        parsedRows.sort((a, b) => a.id - b.id);
+
+        for (const msg of parsedRows) {
+          if (msg.private || msg.messageType === "activity" || msg.messageType === "other") {
+            continue;
+          }
+
+          const rawItem = rawMap.get(msg.id);
+          const senderObj = rawItem?.sender as
+            | { name?: unknown; type?: unknown }
+            | undefined;
+          const senderName =
+            typeof senderObj?.name === "string" && senderObj.name.trim()
+              ? senderObj.name.trim()
+              : null;
+
+          if (msg.messageType === "incoming") {
+            const renderedText = renderInboundMessage(
+              {
+                text: msg.content,
+                transcribedText: msg.transcribedText,
+                imageDescription: msg.imageDescription,
+                extractedText: msg.extractedText,
+                attachmentTypes: msg.attachmentTypes,
+                attachmentName: msg.attachmentName,
+                location: msg.location,
+                inReplyTo: msg.inReplyTo,
+                isReaction: msg.isReaction,
+              },
+              { resolveQuoted },
+            );
+
+            if (!renderedText.trim()) continue;
+
+            const ingestStatus = await ingestMessageIntoThread({
+              tenantId,
+              instanceId,
+              conversationId: conv.id,
+              contactInboxId: contactInboxId ?? conv.id,
+              graphThreadId,
+              messageId: msg.id,
+              role: "customer",
+              text: renderedText,
+              base,
+            });
+
+            if (ingestStatus === "ingested") {
+              result.messagesIngested++;
+              convIngested++;
+            } else {
+              result.messagesSkipped++;
+              convSkipped++;
+            }
+          } else if (
+            msg.messageType === "outgoing" ||
+            msg.messageType === "template"
+          ) {
+            const text = msg.content.trim();
+            if (!text) continue;
+
+            const ingestStatus = await ingestMessageIntoThread({
+              tenantId,
+              instanceId,
+              conversationId: conv.id,
+              contactInboxId: contactInboxId ?? conv.id,
+              graphThreadId,
+              messageId: msg.id,
+              role: "human_agent",
+              text,
+              agentName: senderName || "Atendente",
+              base,
+            });
+
+            if (ingestStatus === "ingested") {
+              result.messagesIngested++;
+              convIngested++;
+            } else {
+              result.messagesSkipped++;
+              convSkipped++;
+            }
+          }
+        }
+
+        state.messagesIngested = result.messagesIngested;
+        state.messagesSkipped = result.messagesSkipped;
+        state.logs.push(
+          `   ✓ #${conv.id}: ${convIngested} ingeridas, ${convSkipped} já existiam`,
+        );
+      } catch (convErr) {
+        const errMsg =
+          convErr instanceof Error ? convErr.message : String(convErr);
+        logger.warn(
+          "Error migrating conversation %d on instance %s: %s",
+          conv.id,
+          String(instanceId),
+          errMsg,
+        );
+        result.errors.push({ conversationId: conv.id, error: errMsg });
+        state.errorsCount = result.errors.length;
+        state.logs.push(`   ⚠ #${conv.id}: ${errMsg}`);
+      }
+
+      // Trim logs if they grow too large
+      if (state.logs.length > 200) {
+        state.logs = state.logs.slice(-150);
+      }
+    }
+
+    state.running = false;
+    state.phase = "done";
+    state.result = result;
+    state.finishedAt = new Date().toISOString();
+    state.logs.push("✅ Migração concluída!");
+  })().catch((err) => {
+    logger.error("Unhandled error in migration task: %s", err instanceof Error ? err.stack : String(err));
+    state.running = false;
+    state.phase = "error";
+    state.error = err instanceof Error ? err.message : String(err);
+    state.logs.push(`❌ Erro inesperado: ${state.error}`);
+    state.finishedAt = new Date().toISOString();
+  });
+
+  return state;
 }

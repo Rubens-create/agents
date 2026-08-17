@@ -1,5 +1,5 @@
-import { AlertCircle, CheckCircle2, History, Loader2 } from "lucide-react";
-import { useRef, useState } from "react";
+import { CheckCircle2, History, Loader2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Button,
@@ -29,37 +29,19 @@ interface MigrationResult {
   errors: Array<{ conversationId: number; error: string }>;
 }
 
-// Progress event types matching the backend stream
-type MigrationProgressEvent =
-  | { type: "discovery"; totalConversations: number }
-  | {
-      type: "conversation_start";
-      conversationId: number;
-      index: number;
-      total: number;
-    }
-  | {
-      type: "conversation_done";
-      conversationId: number;
-      ingested: number;
-      skipped: number;
-    }
-  | { type: "conversation_error"; conversationId: number; error: string }
-  | { type: "complete"; result: MigrationResult };
-
-interface ProgressState {
-  phase: "discovering" | "processing" | "done";
+interface MigrationTaskState {
+  instanceId: string;
+  running: boolean;
+  phase: "idle" | "discovering" | "processing" | "done" | "error";
   totalConversations: number;
   currentIndex: number;
   currentConversationId: number | null;
   messagesIngested: number;
   messagesSkipped: number;
-  errors: number;
+  errorsCount: number;
   logs: string[];
-}
-
-function addLog(prev: ProgressState, msg: string): ProgressState {
-  return { ...prev, logs: [...prev.logs.slice(-100), msg] };
+  result: MigrationResult | null;
+  error?: string | null;
 }
 
 export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
@@ -70,19 +52,29 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
   const [limit, setLimit] = useState<string>("100");
   const [status, setStatus] = useState<string>("all");
   const [running, setRunning] = useState(false);
+  const [taskState, setTaskState] = useState<MigrationTaskState | null>(null);
   const [result, setResult] = useState<MigrationResult | null>(null);
-  const [progress, setProgress] = useState<ProgressState | null>(null);
+
   const logEndRef = useRef<HTMLDivElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopPolling = () => {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  };
 
   const resetState = () => {
+    stopPolling();
     setResult(null);
     setRunning(false);
-    setProgress(null);
+    setTaskState(null);
   };
 
   const handleClose = () => {
     if (running) return;
+    stopPolling();
     modal?.close();
     setTimeout(resetState, 300);
   };
@@ -93,34 +85,106 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
     });
   };
 
+  const checkStatus = async (): Promise<MigrationTaskState | null> => {
+    if (!target?.instanceId) return null;
+    try {
+      const headers: Record<string, string> = {};
+      const tenantId = getActiveTenantId();
+      if (tenantId) headers["X-Tenant-Id"] = tenantId;
+
+      const res = await fetch(
+        `/api/v1/chatwoot/instances/${encodeURIComponent(target.instanceId)}/migrate-history/status`,
+        { headers, credentials: "include" },
+      );
+      if (!res.ok) return null;
+      const data = (await res.json()) as { status?: MigrationTaskState };
+      return data.status ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  const startPolling = () => {
+    stopPolling();
+    pollTimerRef.current = setInterval(async () => {
+      const current = await checkStatus();
+      if (!current) return;
+
+      setTaskState(current);
+      scrollToBottom();
+
+      if (current.phase === "done" && current.result) {
+        stopPolling();
+        setRunning(false);
+        setResult(current.result);
+        showToast(
+          t(
+            "channels.migrateSuccessDesc",
+            "{{count}} mensagens foram importadas para a memória dos agentes.",
+            { count: current.result.messagesIngested },
+          ),
+          "success",
+        );
+      } else if (current.phase === "error") {
+        stopPolling();
+        setRunning(false);
+        showToast(
+          current.error || t("channels.migrateError", "Erro ao migrar histórico"),
+          "error",
+        );
+      }
+    }, 1000);
+  };
+
+  // Check if a task is already running when the modal opens
+  useEffect(() => {
+    if (!target?.instanceId) return;
+    let isMounted = true;
+
+    checkStatus().then((current) => {
+      if (!isMounted || !current) return;
+      if (current.running) {
+        setTaskState(current);
+        setRunning(true);
+        startPolling();
+      } else if (current.phase === "done" && current.result) {
+        setTaskState(current);
+        setResult(current.result);
+      }
+    });
+
+    return () => {
+      isMounted = false;
+      stopPolling();
+    };
+  }, [target?.instanceId]);
+
   const startMigration = async () => {
     if (!target?.instanceId) return;
     setRunning(true);
     setResult(null);
-    setProgress({
+    setTaskState({
+      instanceId: target.instanceId,
+      running: true,
       phase: "discovering",
       totalConversations: 0,
       currentIndex: 0,
       currentConversationId: null,
       messagesIngested: 0,
       messagesSkipped: 0,
-      errors: 0,
-      logs: ["Conectando ao Chatwoot e buscando conversas..."],
+      errorsCount: 0,
+      logs: ["Iniciando processo de migração no servidor..."],
+      result: null,
     });
 
     const maxConversations = limit === "0" ? 0 : Number(limit);
-    const controller = new AbortController();
-    abortRef.current = controller;
 
     try {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
-        Accept: "text/event-stream",
       };
       const tenantId = getActiveTenantId();
-      if (tenantId) {
-        headers["X-Tenant-Id"] = tenantId;
-      }
+      if (tenantId) headers["X-Tenant-Id"] = tenantId;
 
       const res = await fetch(
         `/api/v1/chatwoot/instances/${encodeURIComponent(target.instanceId)}/migrate-history`,
@@ -133,195 +197,44 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
             status,
             inboxId: target.inboxId,
           }),
-          signal: controller.signal,
         },
       );
 
       if (!res.ok) {
-        let msg = `Erro HTTP ${res.status}: falha na migração`;
+        let msg = `Erro HTTP ${res.status}: falha ao iniciar migração`;
         try {
           const rawText = await res.text();
           try {
             const errBody = JSON.parse(rawText) as Record<string, unknown>;
-            msg =
-              (errBody.error as string) ||
-              (errBody.message as string) ||
-              msg;
+            msg = (errBody.error as string) || (errBody.message as string) || msg;
           } catch {
-            if (rawText && rawText.length < 300) {
-              msg = rawText;
-            }
+            if (rawText && rawText.length < 300) msg = rawText;
           }
         } catch {
-          // Ignore read error
+          // ignore
         }
         showToast(msg, "error");
-        setProgress((p) => (p ? addLog(p, `❌ ${msg}`) : p));
+        setRunning(false);
+        setTaskState((prev) =>
+          prev ? { ...prev, running: false, phase: "error", logs: [...prev.logs, `❌ ${msg}`] } : null,
+        );
         return;
       }
 
-      const contentType = res.headers.get("content-type") || "";
-
-      if (contentType.includes("text/event-stream") && res.body) {
-        // Stream NDJSON events
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed) continue;
-
-            try {
-              const event = JSON.parse(trimmed) as MigrationProgressEvent;
-              handleProgressEvent(event);
-              scrollToBottom();
-            } catch {
-              // Ignore malformed lines
-            }
-          }
-        }
-
-        // Process remaining buffer
-        if (buffer.trim()) {
-          try {
-            const event = JSON.parse(buffer.trim()) as MigrationProgressEvent;
-            handleProgressEvent(event);
-          } catch {
-            // Ignore
-          }
-        }
-      } else {
-        // Fallback: synchronous JSON response
-        const body = (await res.json()) as { result?: MigrationResult };
-        if (body?.result) {
-          setResult(body.result);
-          setProgress((p) =>
-            p
-              ? {
-                  ...addLog(p, "✅ Migração concluída!"),
-                  phase: "done",
-                  messagesIngested: body.result!.messagesIngested,
-                  messagesSkipped: body.result!.messagesSkipped,
-                  errors: body.result!.errors.length,
-                }
-              : p,
-          );
-          showToast(
-            t(
-              "channels.migrateSuccessDesc",
-              "{{count}} mensagens foram importadas para a memória dos agentes.",
-              { count: body.result.messagesIngested },
-            ),
-            "success",
-          );
-        }
+      const data = (await res.json()) as { status?: MigrationTaskState };
+      if (data.status) {
+        setTaskState(data.status);
       }
+
+      // Begin polling for live updates every second
+      startPolling();
     } catch (err) {
-      if ((err as Error).name === "AbortError") return;
-      showToast(
-        err instanceof Error ? err.message : String(err),
-        "error",
-      );
-      setProgress((p) =>
-        p
-          ? addLog(p, `❌ Erro: ${err instanceof Error ? err.message : String(err)}`)
-          : p,
-      );
-    } finally {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(msg, "error");
       setRunning(false);
-      abortRef.current = null;
-    }
-  };
-
-  const handleProgressEvent = (event: MigrationProgressEvent) => {
-    switch (event.type) {
-      case "discovery":
-        setProgress((p) =>
-          p
-            ? {
-                ...addLog(
-                  p,
-                  `📋 ${event.totalConversations} conversas encontradas`,
-                ),
-                phase: "processing",
-                totalConversations: event.totalConversations,
-              }
-            : p,
-        );
-        break;
-
-      case "conversation_start":
-        setProgress((p) =>
-          p
-            ? {
-                ...addLog(
-                  p,
-                  `💬 Conversa #${event.conversationId} (${event.index + 1}/${event.total})...`,
-                ),
-                currentIndex: event.index + 1,
-                currentConversationId: event.conversationId,
-              }
-            : p,
-        );
-        break;
-
-      case "conversation_done":
-        setProgress((p) =>
-          p
-            ? {
-                ...addLog(
-                  p,
-                  `   ✓ #${event.conversationId}: ${event.ingested} ingeridas, ${event.skipped} já existiam`,
-                ),
-                messagesIngested: p.messagesIngested + event.ingested,
-                messagesSkipped: p.messagesSkipped + event.skipped,
-              }
-            : p,
-        );
-        break;
-
-      case "conversation_error":
-        setProgress((p) =>
-          p
-            ? {
-                ...addLog(
-                  p,
-                  `   ⚠ #${event.conversationId}: ${event.error}`,
-                ),
-                errors: p.errors + 1,
-              }
-            : p,
-        );
-        break;
-
-      case "complete":
-        setResult(event.result);
-        setProgress((p) =>
-          p
-            ? {
-                ...addLog(p, "✅ Migração concluída!"),
-                phase: "done",
-              }
-            : p,
-        );
-        showToast(
-          t(
-            "channels.migrateSuccessDesc",
-            "{{count}} mensagens foram importadas para a memória dos agentes.",
-            { count: event.result.messagesIngested },
-          ),
-          "success",
-        );
-        break;
+      setTaskState((prev) =>
+        prev ? { ...prev, running: false, phase: "error", logs: [...prev.logs, `❌ Erro: ${msg}`] } : null,
+      );
     }
   };
 
@@ -332,9 +245,10 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
     : t("channels.migrateTitle", "Migrar Conversas do Chatwoot");
 
   const progressPercent =
-    progress && progress.totalConversations > 0
-      ? Math.round(
-          (progress.currentIndex / progress.totalConversations) * 100,
+    taskState && taskState.totalConversations > 0
+      ? Math.min(
+          100,
+          Math.round((taskState.currentIndex / taskState.totalConversations) * 100),
         )
       : 0;
 
@@ -368,7 +282,7 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
       }
     >
       <div className="flex flex-col gap-4">
-        {target && !progress && (
+        {target && !taskState && (
           <p className="text-sm text-text-muted">
             {target.inboxName
               ? t(
@@ -435,14 +349,14 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
               </p>
             )}
           </div>
-        ) : progress ? (
+        ) : taskState ? (
           <div className="flex flex-col gap-3">
             {/* Progress bar */}
-            {progress.phase === "processing" && (
+            {taskState.phase === "processing" && (
               <div className="flex flex-col gap-1.5">
                 <div className="flex items-center justify-between text-xs text-text-muted">
                   <span>
-                    {progress.currentIndex} / {progress.totalConversations}{" "}
+                    {taskState.currentIndex} / {taskState.totalConversations}{" "}
                     conversas
                   </span>
                   <span>{progressPercent}%</span>
@@ -457,24 +371,24 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
             )}
 
             {/* Live counters */}
-            {progress.phase === "processing" && (
+            {taskState.phase === "processing" && (
               <div className="grid grid-cols-3 gap-2 text-center">
                 <div className="rounded-md bg-bg-tertiary p-1.5">
                   <span className="block font-bold text-accent text-sm">
-                    {progress.messagesIngested}
+                    {taskState.messagesIngested}
                   </span>
                   <span className="text-text-muted text-xs">ingeridas</span>
                 </div>
                 <div className="rounded-md bg-bg-tertiary p-1.5">
                   <span className="block font-bold text-sm text-text-muted">
-                    {progress.messagesSkipped}
+                    {taskState.messagesSkipped}
                   </span>
                   <span className="text-text-muted text-xs">já existiam</span>
                 </div>
-                {progress.errors > 0 && (
+                {taskState.errorsCount > 0 && (
                   <div className="rounded-md bg-bg-tertiary p-1.5">
                     <span className="block font-bold text-error text-sm">
-                      {progress.errors}
+                      {taskState.errorsCount}
                     </span>
                     <span className="text-text-muted text-xs">erros</span>
                   </div>
@@ -484,7 +398,7 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
 
             {/* Log area */}
             <div className="max-h-48 overflow-y-auto rounded-lg border border-border bg-bg-secondary p-3 font-mono text-xs text-text-muted">
-              {progress.logs.map((log, i) => (
+              {taskState.logs.map((log, i) => (
                 <div
                   key={i}
                   className={
@@ -502,7 +416,7 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
             </div>
 
             {/* Spinner during discovery */}
-            {progress.phase === "discovering" && (
+            {taskState.phase === "discovering" && (
               <div className="flex items-center justify-center gap-2 py-2 text-accent text-sm">
                 <Loader2
                   className="h-5 w-5 animate-spin"
