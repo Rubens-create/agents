@@ -31,7 +31,7 @@ interface MigrationResult {
 
 export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
   const { t } = useTranslation();
-  const { toast } = useToast();
+  const { showToast } = useToast();
   const target = modal?.payload;
 
   const [limit, setLimit] = useState<string>("100");
@@ -89,33 +89,27 @@ export function MigrateHistoryModal({ modal }: MigrateHistoryModalProps) {
           (errBody.error as string) ||
           (errBody.message as string) ||
           `Erro HTTP ${res.status}: falha na migração`;
-        toast({
-          variant: "error",
-          title: t("channels.migrateError", "Falha na migração de histórico"),
-          description: msg,
-        });
+        showToast(msg, "error");
         return;
       }
 
       const body = (await res.json()) as { result?: MigrationResult };
       if (body?.result) {
         setResult(body.result);
-        toast({
-          variant: "success",
-          title: t("channels.migrateSuccess", "Migração concluída!"),
-          description: t(
+        showToast(
+          t(
             "channels.migrateSuccessDesc",
             "{{count}} mensagens foram importadas para a memória dos agentes.",
             { count: body.result.messagesIngested },
           ),
-        });
+          "success",
+        );
       }
     } catch (err) {
-      toast({
-        variant: "error",
-        title: t("channels.migrateError", "Erro ao migrar histórico"),
-        description: err instanceof Error ? err.message : String(err),
-      });
+      showToast(
+        err instanceof Error ? err.message : String(err),
+        "error",
+      );
     } finally {
       setRunning(false);
     }
