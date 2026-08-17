@@ -32,7 +32,7 @@ import {
   softDisconnectChatwootInstance,
   syncInboxes,
 } from "@/modules/chatwoot/management";
-import { migrateChatwootInstanceHistory } from "@/modules/chatwoot/migration";
+import { migrateChatwootInstanceHistory, migrateChatwootInstanceHistoryStream } from "@/modules/chatwoot/migration";
 
 // Chatwoot instance + inbox management (per-tenant). TENANT_ADMIN. SEPARATE from the public webhook
 // receiver controller (same /v1/chatwoot prefix; no path overlap: /instances* + /inboxes* here vs
@@ -556,21 +556,54 @@ export const chatwootAdminController = new Elysia({
   // Migrate historical conversations from Chatwoot into the LangGraph checkpointer memory.
   .post(
     "/instances/:id/migrate-history",
-    async ({ tenantContext, params, body }) => {
+    async ({ tenantContext, params, body, request }) => {
       const ctx = ctxOrThrow(tenantContext);
       const b = (body ?? {}) as {
         maxConversations?: number;
         status?: "all" | "open" | "pending" | "resolved" | "snoozed";
         inboxId?: number;
       };
+      const opts = {
+        maxConversations: b.maxConversations,
+        status: b.status,
+        inboxId: b.inboxId,
+      };
+
+      // Stream NDJSON progress events when the client requests it
+      const wantsStream = request.headers.get("accept")?.includes("text/event-stream");
+      if (wantsStream) {
+        const gen = migrateChatwootInstanceHistoryStream(
+          ctx.tenantId,
+          BigInt(params.id),
+          opts,
+        );
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+          async pull(controller) {
+            const { value, done } = await gen.next();
+            if (done) {
+              controller.close();
+              return;
+            }
+            controller.enqueue(
+              encoder.encode(JSON.stringify(value) + "\n"),
+            );
+          },
+        });
+        return new Response(stream, {
+          headers: {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            connection: "keep-alive",
+          },
+        });
+      }
+
+      // Fallback: synchronous response
       const result = await migrateChatwootInstanceHistory(
         ctx.tenantId,
         BigInt(params.id),
-        {
-          maxConversations: b.maxConversations,
-          status: b.status,
-          inboxId: b.inboxId,
-        },
+        opts,
       );
       return {
         instance: instanceIdentity,
