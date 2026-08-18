@@ -10,6 +10,7 @@ import type { ChatwootClient } from "@/modules/chatwoot/client";
 import { loadChatwootClient } from "@/modules/chatwoot/instance";
 import {
   buildQuoteResolver,
+  hasHumanOutgoingAfter,
   maxIncomingId,
   parseChatwootMessages,
 } from "@/modules/chatwoot/messages";
@@ -799,10 +800,17 @@ export async function runAgentTurn(
             const latest = parseChatwootMessages(
               await client.getMessages(conversationId),
             );
-            if (maxIncomingId(latest, triggerId) > triggerId) {
+            const hasNewerIncoming =
+              maxIncomingId(latest, triggerId) > triggerId;
+            const hasHumanReply = hasHumanOutgoingAfter(latest, triggerId, {
+              ourAgentBotId: loaded.agentBotId ?? agentBotId,
+            });
+            if (hasNewerIncoming || hasHumanReply) {
               logger.info(
-                "direct turn: superseded mid-turn (conv=%s), deferring",
+                "direct turn: superseded mid-turn (conv=%s, newerIncoming=%s, humanReply=%s), deferring",
                 String(conversationId),
+                hasNewerIncoming,
+                hasHumanReply,
               );
               return false;
             }

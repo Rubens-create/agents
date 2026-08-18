@@ -159,6 +159,42 @@ describe("pendingIncoming", () => {
     });
     expect(pendingIncoming(withAudio, null).map((m) => m.id)).toEqual([1]);
   });
+
+  test("human agent reply excludes all prior customer messages", () => {
+    const convWithHuman = parseChatwootMessages({
+      payload: [
+        { id: 1, content: "oi", message_type: 0, private: false },
+        { id: 2, content: "tudo bem?", message_type: 0, private: false },
+        {
+          id: 3,
+          content: "Olá! Como posso ajudar?",
+          message_type: 1,
+          private: false,
+          sender: { id: 10, name: "Atendente", type: "user" },
+        },
+      ],
+    });
+    // Human replied at id 3, so prior customer messages 1 and 2 are considered answered
+    expect(pendingIncoming(convWithHuman, null).map((m) => m.id)).toEqual([]);
+  });
+
+  test("new customer message after human agent reply is returned as pending", () => {
+    const convWithNewCustomerMsg = parseChatwootMessages({
+      payload: [
+        { id: 1, content: "oi", message_type: 0, private: false },
+        {
+          id: 2,
+          content: "Olá! Como posso ajudar?",
+          message_type: 1,
+          private: false,
+          sender: { id: 10, name: "Atendente", type: "user" },
+        },
+        { id: 3, content: "Gostaria de saber o preço", message_type: 0, private: false },
+      ],
+    });
+    // Message 1 is answered by human (id 2), but message 3 arrived after human reply
+    expect(pendingIncoming(convWithNewCustomerMsg, null).map((m) => m.id)).toEqual([3]);
+  });
 });
 
 describe("buildQuoteResolver", () => {

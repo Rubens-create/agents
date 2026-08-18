@@ -42,7 +42,11 @@ import {
   announceFailedTurn,
   readDirectFence,
 } from "@/modules/conversations/failure-note";
-import { armDebounce, resolveDebounceConfig } from "@/modules/debounce/service";
+import {
+  armDebounce,
+  debounceDedupeKey,
+  resolveDebounceConfig,
+} from "@/modules/debounce/service";
 import { advanceHandledWatermark } from "@/modules/debounce/watermark";
 import { cancelPendingJob } from "@/modules/scheduler/service";
 import {
@@ -1213,6 +1217,44 @@ export async function processChatwootDelivery(
     }
   }
 
+  // A human agent's outgoing reply: cancel any pending debounce and follow-up jobs so the bot
+  // will not answer customer messages that the human has now handled, and stop any live debounce indicator.
+  if (isHumanAgentMessage(n) && n.conversationId !== null) {
+    const threadId = chatwootThreadId(
+      params.tenantId,
+      params.instanceId,
+      n.conversationId,
+    );
+    try {
+      await cancelPendingJob(
+        params.tenantId,
+        "DEBOUNCE",
+        debounceDedupeKey(threadId),
+        base,
+      );
+      await cancelPendingJob(
+        params.tenantId,
+        "FOLLOWUP",
+        `followup:${threadId}`,
+        base,
+      );
+    } catch (err) {
+      logger.warn(
+        "failed to cancel pending jobs on human reply (conv=%s): %s",
+        convLabel,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    if (mirror.conversationRowId !== null) {
+      broadcastAgentActivity(params.tenantId, {
+        conversationId: String(mirror.conversationRowId),
+        phase: "stopped",
+        stage: "debounce",
+        tool: null,
+      });
+    }
+  }
+
   // Hoisted so the ingestion pass below can tell an out-of-hours-silenced incoming (consumed) from an
   // answered one. Stays false on every path that never runs the gate.
   let consumed = false;
@@ -1417,8 +1459,7 @@ export async function processChatwootDelivery(
   // included (issue #8). When a turn WILL run (act && !consumed), the turn/flush owns the advance.
   // Best-effort: a miss only widens a later re-coalesce.
   if (
-    isNewIncoming &&
-    (!act || consumed) &&
+    ((isNewIncoming && (!act || consumed)) || isHumanAgentMessage(n)) &&
     n.message?.id != null &&
     mirror.conversationRowId !== null
   ) {

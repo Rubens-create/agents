@@ -13,6 +13,7 @@ import { loadChatwootClient } from "@/modules/chatwoot/instance";
 import {
   buildQuoteResolver,
   type ChatwootMessageRow,
+  hasHumanOutgoingAfter,
   maxIncomingId,
   parseChatwootMessages,
   pendingIncoming,
@@ -150,11 +151,18 @@ export async function coalesceAndRunTurn(
       const latest = parseChatwootMessages(
         await client.getMessages(conversationId),
       );
-      if (maxIncomingId(latest, targetWatermark) > targetWatermark) {
+      const hasNewerIncoming =
+        maxIncomingId(latest, targetWatermark) > targetWatermark;
+      const hasHumanReply = hasHumanOutgoingAfter(latest, targetWatermark, {
+        ourAgentBotId: agentBotId,
+      });
+      if (hasNewerIncoming || hasHumanReply) {
         logger.info(
-          "%s: superseded mid-turn (conv=%s), deferring",
+          "%s: superseded mid-turn (conv=%s, newerIncoming=%s, humanReply=%s), deferring",
           ctx.label,
           String(conversationId),
+          hasNewerIncoming,
+          hasHumanReply,
         );
         return false;
       }
@@ -347,7 +355,10 @@ export async function flushDebounceJob(
         convDbId: ctx.convDbId,
         loaded: ctx.loaded,
         settings: ctx.settings,
-        selectPending: (messages) => pendingIncoming(messages, watermark),
+        selectPending: (messages) =>
+          pendingIncoming(messages, watermark, {
+            ourAgentBotId: agentBotId,
+          }),
         label: "debounce flush",
         coalesceStage: "debounce",
       },

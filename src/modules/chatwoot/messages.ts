@@ -18,6 +18,9 @@ export interface ChatwootMessageRow {
   content: string;
   messageType: "incoming" | "outgoing" | "activity" | "template" | "other";
   private: boolean;
+  senderType: string | null;
+  senderId: number | null;
+  senderName: string | null;
   // Chatwoot file_type of each attachment ("audio" | "image" | "file" | ...).
   attachmentTypes: string[];
   // STT transcription, read back from the FIRST attachment's meta.transcribed_text (set by the
@@ -68,9 +71,10 @@ function metaStringFrom(attachments: unknown, key: string): string | null {
   if (!Array.isArray(attachments)) return null;
   for (const a of attachments) {
     if (!isRecord(a)) continue;
-    const meta = isRecord(a.meta) ? a.meta : null;
-    const t = meta?.[key];
-    if (typeof t === "string" && t.trim()) return t;
+    const m = a.meta;
+    if (isRecord(m) && typeof m[key] === "string" && m[key].trim().length > 0) {
+      return m[key].trim();
+    }
   }
   return null;
 }
@@ -80,12 +84,18 @@ function fileNameFrom(attachments: unknown): string | null {
   if (!Array.isArray(attachments)) return null;
   for (const a of attachments) {
     if (!isRecord(a)) continue;
+    // NOTE: Ignore a location attachment's google-maps data_url — it basename-splits to "maps" and
+    // falsely reads as a real attachment name ("maps.undefined") on the unsupported marker.
+    if (a.file_type === "location") continue;
     const url = typeof a.data_url === "string" ? a.data_url : null;
     if (!url) continue;
-    const path = url.split("?")[0] ?? url;
-    const base = path.slice(path.lastIndexOf("/") + 1);
-    const name = decodeURIComponent(base).trim();
-    if (name) return name;
+    try {
+      const pathname = new URL(url).pathname;
+      const base = pathname.split("/").pop();
+      if (base) return decodeURIComponent(base);
+    } catch {
+      // Not a valid URL — ignore.
+    }
   }
   return null;
 }
@@ -94,23 +104,18 @@ function fileNameFrom(attachments: unknown): string | null {
 // reads: coordinates_lat / coordinates_long / fallback_title).
 function locationFrom(attachments: unknown): RenderableLocation | null {
   if (!Array.isArray(attachments)) return null;
-  return firstLocationAttachment(
-    attachments.filter(isRecord).map((a) => ({
-      fileType: typeof a.file_type === "string" ? a.file_type : null,
-      latitude:
-        typeof a.coordinates_lat === "number" &&
-        Number.isFinite(a.coordinates_lat)
-          ? a.coordinates_lat
-          : null,
-      longitude:
-        typeof a.coordinates_long === "number" &&
-        Number.isFinite(a.coordinates_long)
-          ? a.coordinates_long
-          : null,
-      fallbackTitle:
-        typeof a.fallback_title === "string" ? a.fallback_title : null,
-    })),
-  );
+  for (const a of attachments) {
+    if (!isRecord(a) || a.file_type !== "location") continue;
+    const lat = num(a.coordinates_lat);
+    const lng = num(a.coordinates_long);
+    if (lat === null || lng === null) continue;
+    const title =
+      typeof a.fallback_title === "string" && a.fallback_title.trim().length > 0
+        ? a.fallback_title.trim()
+        : null;
+    return { latitude: lat, longitude: lng, ...(title ? { title } : {}) };
+  }
+  return null;
 }
 
 function attachmentTypesFrom(attachments: unknown): string[] {
@@ -138,11 +143,21 @@ export function parseChatwootMessages(raw: unknown): ChatwootMessageRow[] {
     const ca = isRecord(item.content_attributes)
       ? item.content_attributes
       : null;
+    const msgSender = isRecord(item.sender) ? item.sender : null;
     out.push({
       id,
       content: typeof item.content === "string" ? item.content : "",
       messageType: messageType(item.message_type),
       private: item.private === true,
+      senderType:
+        msgSender && typeof msgSender.type === "string"
+          ? msgSender.type.toLowerCase()
+          : null,
+      senderId: msgSender ? num(msgSender.id) : null,
+      senderName:
+        msgSender && typeof msgSender.name === "string"
+          ? msgSender.name.trim()
+          : null,
       attachmentTypes: attachmentTypesFrom(item.attachments),
       transcribedText: metaStringFrom(item.attachments, "transcribed_text"),
       imageDescription: metaStringFrom(item.attachments, "image_description"),
@@ -209,18 +224,64 @@ export function maxIncomingId(
   return max;
 }
 
-// The incoming, non-private, RENDERABLE customer messages whose id is beyond the watermark — the
-// burst a flush must answer. Renderable = has text OR an attachment (audio/image/file), so a voice
-// note (empty content) is included. `watermark` null ⇒ everything in the fetched page.
+// Checks if any human agent (user sender) sent an outgoing message after `floor`.
+export function hasHumanOutgoingAfter(
+  messages: ChatwootMessageRow[],
+  floor: number,
+  opts?: { ourAgentBotId?: number | null },
+): boolean {
+  for (const m of messages) {
+    if (
+      (m.messageType === "outgoing" || m.messageType === "template") &&
+      !m.private &&
+      m.id > floor
+    ) {
+      const isHuman =
+        m.senderType === "user" ||
+        (m.senderType !== "agent_bot" &&
+          m.senderId != null &&
+          (opts?.ourAgentBotId == null || m.senderId !== opts.ourAgentBotId));
+      if (isHuman) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// The incoming, non-private, RENDERABLE customer messages whose id is beyond the watermark AND
+// beyond any human agent's outgoing reply — the burst a flush must answer.
+// If a human agent already replied to the customer (outgoing message with senderType "user" after the customer's incoming message),
+// those customer messages are considered answered by the human and are NOT returned.
 export function pendingIncoming(
   messages: ChatwootMessageRow[],
   watermark: number | null,
+  opts?: { ourAgentBotId?: number | null },
 ): ChatwootMessageRow[] {
+  let maxHumanOutgoingId = -1;
+  for (const m of messages) {
+    if (
+      (m.messageType === "outgoing" || m.messageType === "template") &&
+      !m.private
+    ) {
+      const isHuman =
+        m.senderType === "user" ||
+        (m.senderType !== "agent_bot" &&
+          m.senderId != null &&
+          (opts?.ourAgentBotId == null || m.senderId !== opts.ourAgentBotId));
+      if (isHuman && m.id > maxHumanOutgoingId) {
+        maxHumanOutgoingId = m.id;
+      }
+    }
+  }
+
+  const effectiveFloor = Math.max(watermark ?? -1, maxHumanOutgoingId);
+
   return messages.filter(
     (m) =>
       m.messageType === "incoming" &&
       !m.private &&
       (m.content.trim().length > 0 || m.attachmentTypes.length > 0) &&
-      (watermark === null || m.id > watermark),
+      m.id > effectiveFloor,
   );
 }
