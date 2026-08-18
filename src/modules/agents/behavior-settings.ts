@@ -1,3 +1,4 @@
+import { readHumanCooldownConfig } from "@/modules/cooldown/settings";
 import { readLimitsConfig } from "@/modules/agents/limits";
 import { readChannelRedirectConfig } from "@/modules/channel-redirect/service";
 import { readAttributeContextConfig } from "@/modules/chatwoot/attributes";
@@ -14,7 +15,7 @@ import { readTtsConfig } from "@/modules/tts/settings";
 import { readVisionConfig } from "@/modules/vision/settings";
 
 // Normalized read of the per-agent BEHAVIOR config that lives in the free-form `agent.settings` bag
-// (debounce / stt / tts / split / serviceWindow + grounding + followUp). The same typed readers the
+// (debounce / stt / tts / split / serviceWindow + grounding + followUp + humanCooldown). The same typed readers the
 // runtime uses are the single source of defaults + clamping — this composes them so all three
 // transports (REST/UI/MCP) project the SAME validated shape. credentialRef is a `vault:<id>`
 // reference (never the secret itself), so it is safe to surface; the MCP transport translates it
@@ -35,6 +36,7 @@ function readGrounding(settings: unknown): { maxDistance: number | null } {
 
 export interface BehaviorSettings {
   debounce: ReturnType<typeof readDebounceConfig>;
+  humanCooldown: ReturnType<typeof readHumanCooldownConfig>;
   stt: ReturnType<typeof readSttConfig>;
   tts: ReturnType<typeof readTtsConfig>;
   vision: ReturnType<typeof readVisionConfig>;
@@ -56,6 +58,7 @@ export interface BehaviorSettings {
 // untouched on write — this is the merge contract the REST/UI path also honors.
 export const BEHAVIOR_SETTINGS_KEYS = [
   "debounce",
+  "humanCooldown",
   "stt",
   "tts",
   "vision",
@@ -77,6 +80,7 @@ export type BehaviorSettingsKey = (typeof BEHAVIOR_SETTINGS_KEYS)[number];
 export function readBehaviorSettings(settings: unknown): BehaviorSettings {
   return {
     debounce: readDebounceConfig(settings),
+    humanCooldown: readHumanCooldownConfig(settings),
     stt: readSttConfig(settings),
     tts: readTtsConfig(settings),
     vision: readVisionConfig(settings),

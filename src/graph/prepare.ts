@@ -37,6 +37,10 @@ import { resolveVariantOverride } from "@/modules/experiments/service";
 import { emitFlowEvent, type FlowContext } from "@/modules/flowlog/service";
 import { readObservabilityConfig } from "@/modules/flowlog/settings";
 import {
+  type HumanCooldownConfig,
+  readHumanCooldownConfig,
+} from "@/modules/cooldown/settings";
+import {
   type GuardrailsConfig,
   readGuardrailsConfig,
 } from "@/modules/guardrails/settings";
@@ -190,6 +194,8 @@ export interface AgentConfig {
   contactVoiceReply: boolean | null;
   // Humanized text delivery (split into balloons + typing delay).
   splitConfig: SplitConfig;
+  // Human cooldown / silence window after human agent reply.
+  humanCooldownConfig: HumanCooldownConfig;
   // WhatsApp 24h service-window gate for proactive sends + the contact name for template params.
   serviceWindowConfig: ServiceWindowConfig;
   handoffConfig: HandoffConfig;
@@ -548,6 +554,7 @@ export async function loadAgentConfig(
     ttsConfig: readTtsConfig(effSettings),
     contactVoiceReply: conv?.contact?.voiceReply ?? null,
     splitConfig: readSplitConfig(effSettings),
+    humanCooldownConfig: readHumanCooldownConfig(effSettings),
     serviceWindowConfig: readServiceWindowConfig(effSettings),
     handoffConfig: readHandoffConfig(effSettings),
     sendImageConfig: readSendImageConfig(effSettings),

@@ -22,6 +22,7 @@ import {
 } from "@/modules/chatwoot/normalize";
 import { renderInboundMessage } from "@/modules/chatwoot/render";
 import type { NormalizedChatwootEvent } from "@/modules/chatwoot/types";
+import { isWithinHumanCooldown } from "@/modules/cooldown/settings";
 import { advanceHandledWatermark } from "@/modules/debounce/watermark";
 import {
   emitFlowEvent,
@@ -517,15 +518,29 @@ export async function runLoadedTurn(
             chatwootConversationId: conversationId,
           },
         },
-        select: { assigneeType: true, status: true },
+        select: { assigneeType: true, status: true, customAttributes: true },
       });
-      const ours = shouldBotHandle(
+      let ours = shouldBotHandle(
         {
           assigneeType: conv?.assigneeType ?? null,
           status: conv?.status ?? null,
         },
         { ourAgentBotId: ourBot },
       );
+      if (ours && loaded.humanCooldownConfig?.enabled) {
+        const attrs =
+          conv?.customAttributes && typeof conv.customAttributes === "object"
+            ? (conv.customAttributes as Record<string, unknown>)
+            : null;
+        if (
+          isWithinHumanCooldown(
+            attrs?.lastHumanReplyAt as string | undefined,
+            loaded.humanCooldownConfig,
+          )
+        ) {
+          ours = false;
+        }
+      }
       let voiceReply = loaded.contactVoiceReply;
       if (loaded.contactDbId != null) {
         const c = await db.contact.findUnique({

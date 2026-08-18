@@ -263,6 +263,7 @@ function readFollowUpSteps(fu: Record<string, unknown>) {
 function readBehaviorState(a: Agent) {
   const s = (a.settings ?? {}) as Record<string, unknown>;
   const d = (s.debounce ?? {}) as Record<string, unknown>;
+  const hc = (s.humanCooldown ?? s.cooldown ?? {}) as Record<string, unknown>;
   const st = (s.stt ?? {}) as Record<string, unknown>;
   const tt = (s.tts ?? {}) as Record<string, unknown>;
   const sp = (s.split ?? {}) as Record<string, unknown>;
@@ -293,6 +294,10 @@ function readBehaviorState(a: Agent) {
       windowSeconds: num(d.windowSeconds) || "15",
       maxMessagesPerBurst: num(d.maxMessagesPerBurst) || "20",
       maxWindowSeconds: num(d.maxWindowSeconds) || "60",
+    },
+    humanCooldown: {
+      enabled: typeof hc.enabled === "boolean" ? hc.enabled : false,
+      cooldownMinutes: num(hc.cooldownMinutes ?? hc.minutes) || "15",
     },
     stt: {
       enabled: typeof st.enabled === "boolean" ? st.enabled : true,
@@ -553,6 +558,10 @@ export function AgentEditorPage() {
     maxMessagesPerBurst: "20",
     maxWindowSeconds: "60",
   });
+  const [humanCooldown, setHumanCooldown] = useState({
+    enabled: false,
+    cooldownMinutes: "15",
+  });
   // Speech-to-text (voice notes). Provider list mirrors modules/stt/providers.
   const [stt, setStt] = useState({
     enabled: true,
@@ -779,6 +788,7 @@ export function AgentEditorPage() {
     setFollowUpHoursId(b.followUpHoursId);
     setSettings(b.settings);
     setDebounce(b.debounce);
+    setHumanCooldown(b.humanCooldown);
     setStt(b.stt);
     setTts(b.tts);
     setSplit(b.split);
@@ -812,6 +822,7 @@ export function AgentEditorPage() {
     setFollowUpHoursId(b.followUpHoursId);
     setSettings(b.settings);
     setDebounce(b.debounce);
+    setHumanCooldown(b.humanCooldown);
     setStt(b.stt);
     setTts(b.tts);
     setSplit(b.split);
@@ -1002,6 +1013,10 @@ export function AgentEditorPage() {
         maxMessagesPerBurst: Number(debounce.maxMessagesPerBurst) || 20,
         maxWindowSeconds: Number(debounce.maxWindowSeconds) || 60,
       },
+      humanCooldown: {
+        enabled: humanCooldown.enabled,
+        cooldownMinutes: Number(humanCooldown.cooldownMinutes) || 15,
+      },
       stt: {
         enabled: stt.enabled,
         provider: stt.provider,
@@ -1115,6 +1130,7 @@ export function AgentEditorPage() {
       businessHoursId,
       followUpHoursId,
       debounce,
+      humanCooldown,
       stt,
       tts,
       split,
@@ -1608,6 +1624,7 @@ export function AgentEditorPage() {
     setFollowUpHoursId(b.followUpHoursId);
     setSettings(b.settings);
     setDebounce(b.debounce);
+    setHumanCooldown(b.humanCooldown);
     setStt(b.stt);
     setTts(b.tts);
     setSplit(b.split);
@@ -2498,6 +2515,8 @@ export function AgentEditorPage() {
                 setFollowUpHoursId={setFollowUpHoursId}
                 debounce={debounce}
                 setDebounce={setDebounce}
+                humanCooldown={humanCooldown}
+                setHumanCooldown={setHumanCooldown}
                 stt={stt}
                 setStt={setStt}
                 sttCredBaseUrl={sttCredBaseUrl}

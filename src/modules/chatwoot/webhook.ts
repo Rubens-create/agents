@@ -35,6 +35,10 @@ import {
   readChannelRedirectConfig,
 } from "@/modules/channel-redirect/service";
 import {
+  isWithinHumanCooldown,
+  readHumanCooldownConfig,
+} from "@/modules/cooldown/settings";
+import {
   clearConversationError,
   recordConversationError,
 } from "@/modules/conversations/error";
@@ -1218,7 +1222,8 @@ export async function processChatwootDelivery(
   }
 
   // A human agent's outgoing reply: cancel any pending debounce and follow-up jobs so the bot
-  // will not answer customer messages that the human has now handled, and stop any live debounce indicator.
+  // will not answer customer messages that the human has now handled, stop any live debounce indicator,
+  // and stamp lastHumanReplyAt for the cooldown window.
   if (isHumanAgentMessage(n) && n.conversationId !== null) {
     const threadId = chatwootThreadId(
       params.tenantId,
@@ -1252,6 +1257,34 @@ export async function processChatwootDelivery(
         stage: "debounce",
         tool: null,
       });
+      const nowIso = new Date().toISOString();
+      try {
+        await runScopedOn(base, sysCtx(params.tenantId), async (db) => {
+          const conv = await db.conversation.findUnique({
+            where: { id: mirror.conversationRowId! },
+            select: { customAttributes: true },
+          });
+          const existingAttrs =
+            conv?.customAttributes && typeof conv.customAttributes === "object"
+              ? (conv.customAttributes as Record<string, unknown>)
+              : {};
+          await db.conversation.update({
+            where: { id: mirror.conversationRowId! },
+            data: {
+              customAttributes: {
+                ...existingAttrs,
+                lastHumanReplyAt: nowIso,
+              },
+            },
+          });
+        });
+      } catch (err) {
+        logger.warn(
+          "failed to stamp lastHumanReplyAt (conv=%s): %s",
+          convLabel,
+          errMsg(err),
+        );
+      }
     }
   }
 
@@ -1268,6 +1301,34 @@ export async function processChatwootDelivery(
       commandActive,
       base,
     });
+
+    // Human cooldown gate: if a human agent replied recently, stay silent for the configured duration.
+    if (!consumed && rt) {
+      const cooldownCfg = readHumanCooldownConfig(rt.settings);
+      if (cooldownCfg.enabled && mirror.conversationRowId !== null) {
+        const conv = await runScopedOn(base, sysCtx(params.tenantId), (db) =>
+          db.conversation.findUnique({
+            where: { id: mirror.conversationRowId! },
+            select: { customAttributes: true },
+          }),
+        );
+        const attrs =
+          conv?.customAttributes && typeof conv.customAttributes === "object"
+            ? (conv.customAttributes as Record<string, unknown>)
+            : null;
+        const lastHumanReplyAt = attrs?.lastHumanReplyAt as string | undefined;
+        if (isWithinHumanCooldown(lastHumanReplyAt, cooldownCfg)) {
+          logger.info(
+            "chatwoot: bot silent by human cooldown (conv=%s, lastHumanReplyAt=%s, cooldown=%dmin)",
+            convLabel,
+            lastHumanReplyAt,
+            cooldownCfg.cooldownMinutes,
+          );
+          consumed = true;
+        }
+      }
+    }
+
     if (!consumed) {
       // Eager media (STT/vision) so the debounce re-fetch (and the direct path) get text instead of an
       // empty audio/image message. For a production agent this already ran before the gate; the call

@@ -13,6 +13,7 @@ import {
   Scissors,
   ScrollText,
   Trash2,
+  UserCheck,
   Volume2,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
@@ -94,6 +95,11 @@ interface DebounceState {
   windowSeconds: string;
   maxMessagesPerBurst: string;
   maxWindowSeconds: string;
+}
+
+export interface HumanCooldownState {
+  enabled: boolean;
+  cooldownMinutes: string;
 }
 
 interface SttState {
@@ -181,6 +187,8 @@ interface BehaviorTabProps {
   setFollowUpHoursId: (v: string) => void;
   debounce: DebounceState;
   setDebounce: React.Dispatch<React.SetStateAction<DebounceState>>;
+  humanCooldown: HumanCooldownState;
+  setHumanCooldown: React.Dispatch<React.SetStateAction<HumanCooldownState>>;
   stt: SttState;
   setStt: React.Dispatch<React.SetStateAction<SttState>>;
   sttCredBaseUrl: string | null;
@@ -744,6 +752,8 @@ export function BehaviorTab({
   setFollowUpHoursId,
   debounce,
   setDebounce,
+  humanCooldown,
+  setHumanCooldown,
   stt,
   setStt,
   sttCredBaseUrl,
@@ -816,6 +826,11 @@ export function BehaviorTab({
       id: "debounce",
       icon: Layers,
       label: t("editor.debounce", "Message grouping (debounce)"),
+    },
+    {
+      id: "humanCooldown",
+      icon: UserCheck,
+      label: t("editor.humanCooldown", "Human response cooldown"),
     },
     {
       id: "stt",
@@ -973,6 +988,51 @@ export function BehaviorTab({
                       setDebounce({
                         ...debounce,
                         maxWindowSeconds: e.target.value,
+                      })
+                    }
+                  />
+                </FormField>
+              </div>
+            )}
+          </Section>
+
+          <Section
+            id="humanCooldown"
+            icon={UserCheck}
+            title={t("editor.humanCooldown", "Human response cooldown")}
+            description={t(
+              "editor.humanCooldownHint",
+              "Automatically pause the agent for a period after any human agent response.",
+            )}
+          >
+            <SwitchField
+              checked={humanCooldown.enabled}
+              onCheckedChange={(v) =>
+                setHumanCooldown({ ...humanCooldown, enabled: v })
+              }
+              label={t(
+                "editor.humanCooldownEnabled",
+                "Pause AI after human response",
+              )}
+            />
+            {humanCooldown.enabled && (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <FormField
+                  label={t("editor.humanCooldownMinutes", "Cooldown time (min)")}
+                  description={t(
+                    "editor.humanCooldownMinutesHint",
+                    "Time in minutes the AI remains silent after a human message (1 to 1440).",
+                  )}
+                >
+                  <Input
+                    type="number"
+                    min={1}
+                    max={1440}
+                    value={humanCooldown.cooldownMinutes}
+                    onChange={(e) =>
+                      setHumanCooldown({
+                        ...humanCooldown,
+                        cooldownMinutes: e.target.value,
                       })
                     }
                   />

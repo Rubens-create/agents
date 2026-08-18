@@ -19,6 +19,10 @@ import {
   pendingIncoming,
   toRenderable,
 } from "@/modules/chatwoot/messages";
+import {
+  isWithinHumanCooldown,
+  readHumanCooldownConfig,
+} from "@/modules/cooldown/settings";
 import { shouldBotHandle } from "@/modules/chatwoot/normalize";
 import { renderInboundMessage } from "@/modules/chatwoot/render";
 import {
@@ -283,6 +287,7 @@ export async function flushDebounceJob(
         assigneeType: true,
         inboxId: true,
         lastHandledMessageId: true,
+        customAttributes: true,
       },
     });
     if (!conv?.inboxId) return null;
@@ -304,6 +309,26 @@ export async function flushDebounceJob(
       where: { id: inbox.agentId },
       select: { settings: true },
     });
+
+    const cooldownCfg = readHumanCooldownConfig(agentRow?.settings);
+    if (cooldownCfg.enabled) {
+      const attrs =
+        conv.customAttributes && typeof conv.customAttributes === "object"
+          ? (conv.customAttributes as Record<string, unknown>)
+          : null;
+      if (
+        isWithinHumanCooldown(
+          attrs?.lastHumanReplyAt as string | undefined,
+          cooldownCfg,
+        )
+      ) {
+        logger.info(
+          "debounce flush: cancelled by human cooldown (conv=%s)",
+          String(conversationId),
+        );
+        return { gateClosed: true as const, convDbId: conv.id };
+      }
+    }
     const loaded = await loadAgentConfig(db, {
       tenantId,
       instanceId,
