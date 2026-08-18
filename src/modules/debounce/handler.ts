@@ -20,6 +20,7 @@ import {
   toRenderable,
 } from "@/modules/chatwoot/messages";
 import {
+  isThreadWithinHumanCooldown,
   isWithinHumanCooldown,
   readHumanCooldownConfig,
 } from "@/modules/cooldown/settings";
@@ -159,6 +160,9 @@ export async function coalesceAndRunTurn(
         maxIncomingId(latest, targetWatermark) > targetWatermark;
       const hasHumanReply = hasHumanOutgoingAfter(latest, targetWatermark, {
         ourAgentBotId: agentBotId,
+        cooldownMinutes: ctx.loaded.humanCooldownConfig?.enabled
+          ? ctx.loaded.humanCooldownConfig.cooldownMinutes
+          : null,
       });
       if (hasNewerIncoming || hasHumanReply) {
         logger.info(
@@ -312,16 +316,16 @@ export async function flushDebounceJob(
 
     const cooldownCfg = readHumanCooldownConfig(agentRow?.settings);
     if (cooldownCfg.enabled) {
+      const inMemoryCooldown = isThreadWithinHumanCooldown(threadId, cooldownCfg);
       const attrs =
         conv.customAttributes && typeof conv.customAttributes === "object"
           ? (conv.customAttributes as Record<string, unknown>)
           : null;
-      if (
-        isWithinHumanCooldown(
-          attrs?.lastHumanReplyAt as string | undefined,
-          cooldownCfg,
-        )
-      ) {
+      const dbCooldown = isWithinHumanCooldown(
+        attrs?.lastHumanReplyAt as string | undefined,
+        cooldownCfg,
+      );
+      if (inMemoryCooldown || dbCooldown) {
         logger.info(
           "debounce flush: cancelled by human cooldown (conv=%s)",
           String(conversationId),
@@ -383,6 +387,9 @@ export async function flushDebounceJob(
         selectPending: (messages) =>
           pendingIncoming(messages, watermark, {
             ourAgentBotId: agentBotId,
+            cooldownMinutes: ctx.loaded.humanCooldownConfig?.enabled
+              ? ctx.loaded.humanCooldownConfig.cooldownMinutes
+              : null,
           }),
         label: "debounce flush",
         coalesceStage: "debounce",

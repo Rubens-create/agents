@@ -4,7 +4,7 @@ import basePrisma from "@/api/lib/prisma";
 import { withEntityLock } from "@/lib/locks";
 import { runScopedOn, type ScopedDb, type TenantContext } from "@/lib/tenancy";
 import { emitOutbound } from "@/modules/webhooks/outbound/service";
-import { isNewIncomingMessage } from "./normalize";
+import { isHumanAgentMessage, isNewIncomingMessage } from "./normalize";
 import { decideConversationWrites, type StatePayload } from "./state-order";
 import type { NormalizedChatwootEvent } from "./types";
 
@@ -246,11 +246,32 @@ export async function mirrorChatwootEvent(
             ? { chatwootAssigneeAt: decision.assigneeAt }
             : {}),
           ...(inboundAt != null ? { lastInboundAt: inboundAt } : {}),
-          // NOTE: The bags are ASSIGNED (the payload always ships the whole jsonb), but only when the
-          // event carried one: a payload without them must not wipe the stored snapshot.
+          // NOTE: The bags are merged (existing internal properties like lastHumanReplyAt preserved),
+          // but only when the event carried one: a payload without them must not wipe the stored snapshot.
           ...(decision.unversioned && n.customAttributes
-            ? { customAttributes: n.customAttributes as Prisma.InputJsonValue }
-            : {}),
+            ? {
+                customAttributes: {
+                  ...(existing.customAttributes &&
+                  typeof existing.customAttributes === "object"
+                    ? (existing.customAttributes as Record<string, unknown>)
+                    : {}),
+                  ...(n.customAttributes as Record<string, unknown>),
+                  ...(isHumanAgentMessage(n)
+                    ? { lastHumanReplyAt: (newLastEventAt ?? now).toISOString() }
+                    : {}),
+                } as Prisma.InputJsonValue,
+              }
+            : isHumanAgentMessage(n)
+              ? {
+                  customAttributes: {
+                    ...(existing.customAttributes &&
+                    typeof existing.customAttributes === "object"
+                      ? (existing.customAttributes as Record<string, unknown>)
+                      : {}),
+                    lastHumanReplyAt: (newLastEventAt ?? now).toISOString(),
+                  } as Prisma.InputJsonValue,
+                }
+              : {}),
           ...(decision.unversioned && n.kanbanAttributes
             ? { kanbanAttributes: n.kanbanAttributes as Prisma.InputJsonValue }
             : {}),

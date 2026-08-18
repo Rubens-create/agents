@@ -178,7 +178,7 @@ describe("pendingIncoming", () => {
     expect(pendingIncoming(convWithHuman, null).map((m) => m.id)).toEqual([]);
   });
 
-  test("new customer message after human agent reply is returned as pending", () => {
+  test("new customer message after human agent reply is returned as pending when no cooldown is active", () => {
     const convWithNewCustomerMsg = parseChatwootMessages({
       payload: [
         { id: 1, content: "oi", message_type: 0, private: false },
@@ -188,12 +188,52 @@ describe("pendingIncoming", () => {
           message_type: 1,
           private: false,
           sender: { id: 10, name: "Atendente", type: "user" },
+          created_at: 1000,
         },
-        { id: 3, content: "Gostaria de saber o preço", message_type: 0, private: false },
+        { id: 3, content: "Gostaria de saber o preço", message_type: 0, private: false, created_at: 1100 },
       ],
     });
-    // Message 1 is answered by human (id 2), but message 3 arrived after human reply
+    // Message 1 is answered by human (id 2), message 3 arrived after human reply
     expect(pendingIncoming(convWithNewCustomerMsg, null).map((m) => m.id)).toEqual([3]);
+  });
+
+  test("new customer message is suppressed if within human cooldown window", () => {
+    const baseTime = new Date("2026-08-18T10:00:00Z").getTime();
+    const conv = parseChatwootMessages({
+      payload: [
+        { id: 1, content: "oi", message_type: 0, private: false, created_at: baseTime / 1000 },
+        {
+          id: 2,
+          content: "Olá! Como posso ajudar?",
+          message_type: 1,
+          private: false,
+          sender: { id: 10, name: "Atendente", type: "user" },
+          created_at: (baseTime + 60 * 1000) / 1000, // 10:01
+        },
+        {
+          id: 3,
+          content: "Gostaria de saber o preço",
+          message_type: 0,
+          private: false,
+          created_at: (baseTime + 120 * 1000) / 1000, // 10:02 (1 min after human)
+        },
+      ],
+    });
+    // With 15 minutes cooldown and now = 10:02, all messages should be suppressed
+    expect(
+      pendingIncoming(conv, null, {
+        cooldownMinutes: 15,
+        now: new Date(baseTime + 120 * 1000),
+      }).map((m) => m.id),
+    ).toEqual([]);
+
+    // After 16 minutes (now = 10:17), message 3 is no longer suppressed
+    expect(
+      pendingIncoming(conv, null, {
+        cooldownMinutes: 15,
+        now: new Date(baseTime + 17 * 60 * 1000),
+      }).map((m) => m.id),
+    ).toEqual([3]);
   });
 });
 

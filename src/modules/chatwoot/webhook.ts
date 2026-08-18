@@ -35,8 +35,10 @@ import {
   readChannelRedirectConfig,
 } from "@/modules/channel-redirect/service";
 import {
+  isThreadWithinHumanCooldown,
   isWithinHumanCooldown,
   readHumanCooldownConfig,
+  recordHumanReplyTimestamp,
 } from "@/modules/cooldown/settings";
 import {
   clearConversationError,
@@ -1223,13 +1225,14 @@ export async function processChatwootDelivery(
 
   // A human agent's outgoing reply: cancel any pending debounce and follow-up jobs so the bot
   // will not answer customer messages that the human has now handled, stop any live debounce indicator,
-  // and stamp lastHumanReplyAt for the cooldown window.
+  // and stamp lastHumanReplyAt for the cooldown window (both in-memory and database).
   if (isHumanAgentMessage(n) && n.conversationId !== null) {
     const threadId = chatwootThreadId(
       params.tenantId,
       params.instanceId,
       n.conversationId,
     );
+    recordHumanReplyTimestamp(threadId, Date.now());
     try {
       await cancelPendingJob(
         params.tenantId,
@@ -1305,23 +1308,40 @@ export async function processChatwootDelivery(
     // Human cooldown gate: if a human agent replied recently, stay silent for the configured duration.
     if (!consumed && rt) {
       const cooldownCfg = readHumanCooldownConfig(rt.settings);
-      if (cooldownCfg.enabled && mirror.conversationRowId !== null) {
-        const conv = await runScopedOn(base, sysCtx(params.tenantId), (db) =>
-          db.conversation.findUnique({
-            where: { id: mirror.conversationRowId! },
-            select: { customAttributes: true },
-          }),
-        );
-        const attrs =
-          conv?.customAttributes && typeof conv.customAttributes === "object"
-            ? (conv.customAttributes as Record<string, unknown>)
+      if (cooldownCfg.enabled) {
+        const threadId =
+          n.conversationId !== null
+            ? chatwootThreadId(
+                params.tenantId,
+                params.instanceId,
+                n.conversationId,
+              )
             : null;
-        const lastHumanReplyAt = attrs?.lastHumanReplyAt as string | undefined;
-        if (isWithinHumanCooldown(lastHumanReplyAt, cooldownCfg)) {
+        let inCooldown = threadId
+          ? isThreadWithinHumanCooldown(threadId, cooldownCfg)
+          : false;
+        let lastHumanReplyAt: string | undefined = undefined;
+
+        if (!inCooldown && mirror.conversationRowId !== null) {
+          const conv = await runScopedOn(base, sysCtx(params.tenantId), (db) =>
+            db.conversation.findUnique({
+              where: { id: mirror.conversationRowId! },
+              select: { customAttributes: true },
+            }),
+          );
+          const attrs =
+            conv?.customAttributes && typeof conv.customAttributes === "object"
+              ? (conv.customAttributes as Record<string, unknown>)
+              : null;
+          lastHumanReplyAt = attrs?.lastHumanReplyAt as string | undefined;
+          inCooldown = isWithinHumanCooldown(lastHumanReplyAt, cooldownCfg);
+        }
+
+        if (inCooldown) {
           logger.info(
             "chatwoot: bot silent by human cooldown (conv=%s, lastHumanReplyAt=%s, cooldown=%dmin)",
             convLabel,
-            lastHumanReplyAt,
+            lastHumanReplyAt ?? "in-memory",
             cooldownCfg.cooldownMinutes,
           );
           consumed = true;

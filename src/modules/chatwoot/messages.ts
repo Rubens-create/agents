@@ -21,6 +21,7 @@ export interface ChatwootMessageRow {
   senderType: string | null;
   senderId: number | null;
   senderName: string | null;
+  createdAt: number | null;
   // Chatwoot file_type of each attachment ("audio" | "image" | "file" | ...).
   attachmentTypes: string[];
   // STT transcription, read back from the FIRST attachment's meta.transcribed_text (set by the
@@ -48,6 +49,17 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 function num(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
   if (typeof v === "string" && /^\d+$/.test(v)) return Number(v);
+  return null;
+}
+
+function parseTimestamp(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) {
+    return v < 10000000000 ? v * 1000 : v;
+  }
+  if (typeof v === "string") {
+    const parsed = new Date(v).getTime();
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
   return null;
 }
 
@@ -158,6 +170,7 @@ export function parseChatwootMessages(raw: unknown): ChatwootMessageRow[] {
         msgSender && typeof msgSender.name === "string"
           ? msgSender.name.trim()
           : null,
+      createdAt: parseTimestamp(item.created_at),
       attachmentTypes: attachmentTypesFrom(item.attachments),
       transcribedText: metaStringFrom(item.attachments, "transcribed_text"),
       imageDescription: metaStringFrom(item.attachments, "image_description"),
@@ -224,41 +237,19 @@ export function maxIncomingId(
   return max;
 }
 
-// Checks if any human agent (user sender) sent an outgoing message after `floor`.
+// Checks if any human agent (user sender) sent an outgoing message after `floor` or within the cooldown window.
 export function hasHumanOutgoingAfter(
   messages: ChatwootMessageRow[],
   floor: number,
-  opts?: { ourAgentBotId?: number | null },
+  opts?: {
+    ourAgentBotId?: number | null;
+    cooldownMinutes?: number | null;
+    now?: Date;
+  },
 ): boolean {
-  for (const m of messages) {
-    if (
-      (m.messageType === "outgoing" || m.messageType === "template") &&
-      !m.private &&
-      m.id > floor
-    ) {
-      const isHuman =
-        m.senderType === "user" ||
-        (m.senderType !== "agent_bot" &&
-          m.senderId != null &&
-          (opts?.ourAgentBotId == null || m.senderId !== opts.ourAgentBotId));
-      if (isHuman) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
+  const nowMs = opts?.now ? opts.now.getTime() : Date.now();
+  const cooldownMs = (opts?.cooldownMinutes ?? 0) * 60 * 1000;
 
-// The incoming, non-private, RENDERABLE customer messages whose id is beyond the watermark AND
-// beyond any human agent's outgoing reply — the burst a flush must answer.
-// If a human agent already replied to the customer (outgoing message with senderType "user" after the customer's incoming message),
-// those customer messages are considered answered by the human and are NOT returned.
-export function pendingIncoming(
-  messages: ChatwootMessageRow[],
-  watermark: number | null,
-  opts?: { ourAgentBotId?: number | null },
-): ChatwootMessageRow[] {
-  let maxHumanOutgoingId = -1;
   for (const m of messages) {
     if (
       (m.messageType === "outgoing" || m.messageType === "template") &&
@@ -267,11 +258,74 @@ export function pendingIncoming(
       const isHuman =
         m.senderType === "user" ||
         (m.senderType !== "agent_bot" &&
+          m.senderType !== "captain" &&
           m.senderId != null &&
           (opts?.ourAgentBotId == null || m.senderId !== opts.ourAgentBotId));
-      if (isHuman && m.id > maxHumanOutgoingId) {
-        maxHumanOutgoingId = m.id;
+      if (isHuman) {
+        if (m.id > floor) return true;
+        if (
+          cooldownMs > 0 &&
+          m.createdAt &&
+          nowMs - m.createdAt >= 0 &&
+          nowMs - m.createdAt < cooldownMs
+        ) {
+          return true;
+        }
       }
+    }
+  }
+  return false;
+}
+
+// The incoming, non-private, RENDERABLE customer messages whose id is beyond the watermark AND
+// beyond any human agent's outgoing reply — the burst a flush must answer.
+// If a human agent already replied to the customer or replied within the cooldown window,
+// customer messages within that window are considered answered/suppressed and are NOT returned.
+export function pendingIncoming(
+  messages: ChatwootMessageRow[],
+  watermark: number | null,
+  opts?: {
+    ourAgentBotId?: number | null;
+    cooldownMinutes?: number | null;
+    now?: Date;
+  },
+): ChatwootMessageRow[] {
+  let maxHumanOutgoingId = -1;
+  let lastHumanOutgoingTime = 0;
+
+  for (const m of messages) {
+    if (
+      (m.messageType === "outgoing" || m.messageType === "template") &&
+      !m.private
+    ) {
+      const isHuman =
+        m.senderType === "user" ||
+        (m.senderType !== "agent_bot" &&
+          m.senderType !== "captain" &&
+          m.senderId != null &&
+          (opts?.ourAgentBotId == null || m.senderId !== opts.ourAgentBotId));
+      if (isHuman) {
+        if (m.id > maxHumanOutgoingId) {
+          maxHumanOutgoingId = m.id;
+        }
+        if (m.createdAt && m.createdAt > lastHumanOutgoingTime) {
+          lastHumanOutgoingTime = m.createdAt;
+        }
+      }
+    }
+  }
+
+  // If cooldown is configured and a human replied recently, suppress ALL pending messages!
+  if (
+    opts?.cooldownMinutes &&
+    opts.cooldownMinutes > 0 &&
+    lastHumanOutgoingTime > 0
+  ) {
+    const nowMs = opts.now ? opts.now.getTime() : Date.now();
+    const diffMs = nowMs - lastHumanOutgoingTime;
+    const cooldownMs = opts.cooldownMinutes * 60 * 1000;
+    if (diffMs >= 0 && diffMs < cooldownMs) {
+      return [];
     }
   }
 

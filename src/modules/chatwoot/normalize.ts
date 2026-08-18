@@ -252,13 +252,27 @@ export function isNewIncomingMessage(e: NormalizedChatwootEvent): boolean {
 // continuous ingestion: a human colleague's reply is folded into the agent's memory marked as such, so
 // the bot understands what actually happened while it was silent. message_created only (an edit must
 // not re-ingest); not a private note (operator-only, never part of the customer dialogue).
-export function isHumanAgentMessage(e: NormalizedChatwootEvent): boolean {
-  return (
-    e.event === "message_created" &&
-    e.message?.messageType === "outgoing" &&
-    e.message?.private !== true &&
-    e.message?.sender?.type === "user"
-  );
+export function isHumanAgentMessage(
+  e: NormalizedChatwootEvent,
+  opts?: { ourAgentBotId?: number | null },
+): boolean {
+  if (
+    e.event !== "message_created" ||
+    e.message?.messageType !== "outgoing" ||
+    e.message?.private === true
+  ) {
+    return false;
+  }
+  const senderType = e.message?.sender?.type?.toLowerCase();
+  if (senderType === "user") return true;
+  if (senderType === "agent_bot" || senderType === "captain") return false;
+  if (
+    opts?.ourAgentBotId != null &&
+    e.message?.sender?.id === opts.ourAgentBotId
+  ) {
+    return false;
+  }
+  return e.message?.sender?.id != null || senderType !== undefined;
 }
 
 // The control commands an operator types into the conversation to drive the agent (matched on the

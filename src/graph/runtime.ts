@@ -22,7 +22,10 @@ import {
 } from "@/modules/chatwoot/normalize";
 import { renderInboundMessage } from "@/modules/chatwoot/render";
 import type { NormalizedChatwootEvent } from "@/modules/chatwoot/types";
-import { isWithinHumanCooldown } from "@/modules/cooldown/settings";
+import {
+  isThreadWithinHumanCooldown,
+  isWithinHumanCooldown,
+} from "@/modules/cooldown/settings";
 import { advanceHandledWatermark } from "@/modules/debounce/watermark";
 import {
   emitFlowEvent,
@@ -528,16 +531,19 @@ export async function runLoadedTurn(
         { ourAgentBotId: ourBot },
       );
       if (ours && loaded.humanCooldownConfig?.enabled) {
+        const inMemoryCooldown = isThreadWithinHumanCooldown(
+          threadId,
+          loaded.humanCooldownConfig,
+        );
         const attrs =
           conv?.customAttributes && typeof conv.customAttributes === "object"
             ? (conv.customAttributes as Record<string, unknown>)
             : null;
-        if (
-          isWithinHumanCooldown(
-            attrs?.lastHumanReplyAt as string | undefined,
-            loaded.humanCooldownConfig,
-          )
-        ) {
+        const dbCooldown = isWithinHumanCooldown(
+          attrs?.lastHumanReplyAt as string | undefined,
+          loaded.humanCooldownConfig,
+        );
+        if (inMemoryCooldown || dbCooldown) {
           ours = false;
         }
       }
@@ -819,6 +825,9 @@ export async function runAgentTurn(
               maxIncomingId(latest, triggerId) > triggerId;
             const hasHumanReply = hasHumanOutgoingAfter(latest, triggerId, {
               ourAgentBotId: loaded.agentBotId ?? agentBotId,
+              cooldownMinutes: loaded.humanCooldownConfig?.enabled
+                ? loaded.humanCooldownConfig.cooldownMinutes
+                : null,
             });
             if (hasNewerIncoming || hasHumanReply) {
               logger.info(
